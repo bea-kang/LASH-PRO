@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Lash Live AR — spike A</title>
+<style>
+  :root { --bg:#0e0e10; --fg:#f2f2f2; --muted:#9a9aa3; --panel:#17171b; --line:#2a2a31; --accent:#e8a5b3; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 -apple-system,BlinkMacSystemFont,"Pretendard","Apple SD Gothic Neo",sans-serif; }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; }
+  header b { font-size:15px; }
+  header span { color:var(--muted); }
+  main { display:grid; grid-template-columns: 1fr 300px; min-height: calc(100vh - 49px); }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; } }
+  #stage { position:relative; background:#000; display:flex; align-items:center; justify-content:center; overflow:hidden; }
+  #stage video, #stage img { display:none; }
+  #stage canvas { max-width:100%; max-height:calc(100vh - 49px); }
+  #stage .msg { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; padding:24px; color:var(--muted); pointer-events:none; }
+  aside { background:var(--panel); border-left:1px solid var(--line); padding:14px 16px; display:flex; flex-direction:column; gap:14px; overflow:auto; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  label { color:var(--muted); font-size:12px; display:block; margin-bottom:4px; }
+  select, button, input[type=file] { background:#222228; color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; }
+  button.primary { background:var(--accent); color:#1a0e12; border-color:transparent; font-weight:600; }
+  button:disabled { opacity:.5; }
+  .seg { display:flex; gap:4px; }
+  .seg button { flex:1; padding:7px 0; }
+  .seg button.on { background:var(--accent); color:#1a0e12; border-color:transparent; font-weight:600; }
+  .zones { display:grid; grid-template-columns:repeat(5,1fr); gap:6px; }
+  .zones div { text-align:center; }
+  .zones input { width:100%; writing-mode:vertical-lr; direction:rtl; height:90px; }
+  .zones output { display:block; font-size:12px; color:var(--muted); }
+  input[type=range] { width:100%; accent-color:var(--accent); }
+  .hint { color:var(--muted); font-size:12px; }
+  #stats { font-variant-numeric:tabular-nums; color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<header><b>Lash Live AR</b><span>spike A · 파라미터 렌더링 · 컬/구간 길이/볼륨</span></header>
+<main>
+  <section id="stage">
+    <video id="video" playsinline muted></video>
+    <img id="photo" alt="">
+    <canvas id="canvas"></canvas>
+    <div class="msg" id="msg">모델 불러오는 중…</div>
+  </section>
+  <aside>
+    <div class="row">
+      <button class="primary" id="btnCam">카메라 켜기</button>
+      <input type="file" id="file" accept="image/*" style="max-width:150px">
+    </div>
+    <div class="hint" id="hint">인스타·카톡 안에서 열렸으면 카메라가 안 켜질 수 있어요. Safari/Chrome으로 여세요.</div>
+
+    <div>
+      <label>스타일 프리셋</label>
+      <div class="seg" id="style">
+        <button data-v="natural" class="on">내추럴</button>
+        <button data-v="cat">캣아이</button>
+        <button data-v="doll">돌아이</button>
+      </div>
+    </div>
+    <div>
+      <label>컬</label>
+      <div class="seg" id="curl">
+        <button data-v="J">J</button>
+        <button data-v="C" class="on">C</button>
+        <button data-v="D">D</button>
+      </div>
+    </div>
+    <div>
+      <label>구간별 길이 (mm) · 눈앞 → 눈꼬리</label>
+      <div class="zones" id="zones"></div>
+    </div>
+    <div>
+      <label>볼륨</label>
+      <div class="seg" id="volume">
+        <button data-v="natural" class="on">내추럴</button>
+        <button data-v="volume">볼륨</button>
+        <button data-v="mega">메가</button>
+      </div>
+    </div>
+    <div>
+      <label>진하기 <output id="opOut">0.85</output></label>
+      <input type="range" id="opacity" min="0.3" max="1" step="0.05" value="0.85">
+    </div>
+    <div class="row">
+      <button id="btnToggle">속눈썹 끄기</button>
+      <button id="btnMirror">거울 반전</button>
+      <button id="btnSnap">캡처 저장</button>
+    </div>
+    <div id="stats">–</div>
+    <div class="hint">눈 너비를 28mm로 가정해서 mm→px 환산. 눈꺼풀 가림(occlusion)·아래 속눈썹은 아직 없음.</div>
+  </aside>
+</main>
+
+<script type="module">
+import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+// ---- MediaPipe FaceMesh indices ----
+// 이미지 기준 왼쪽 눈(피사체 오른눈): 바깥꼬리 33 → 안쪽 133
+const R_UPPER = [33, 246, 161, 160, 159, 158, 157, 173, 133];
+const R_LOWER = [33, 7, 163, 144, 145, 153, 154, 155, 133];
+// 이미지 기준 오른쪽 눈(피사체 왼눈): 안쪽 362 → 바깥꼬리 263
+const L_UPPER = [362, 398, 384, 385, 386, 387, 388, 466, 263];
+const L_LOWER = [362, 382, 381, 380, 374, 373, 390, 249, 263];
+
+const PRESETS = {
+  natural: [8, 9, 10, 10, 9],
+  cat:     [8, 9, 10, 11, 12],
+  doll:    [9, 10, 12, 10, 9],
+};
+const CURL = { J: 0.35, C: 0.75, D: 1.15 };       // 끝단 회전(rad)
+const VOLUME = { natural: 42, volume: 70, mega: 105 }; // 눈당 가닥 수
+
+const state = {
+  zones: [...PRESETS.natural], curl: 'C', volume: 'natural',
+  opacity: 0.85, show: true, mirror: true, mode: null, // 'video' | 'image'
+};
+
+// ---- UI ----
+const $ = s => document.querySelector(s);
+const zonesEl = $('#zones');
+function renderZones() {
+  zonesEl.innerHTML = '';
+  state.zones.forEach((v, i) => {
+    const d = document.createElement('div');
+    d.innerHTML = `<input type="range" min="6" max="15" step="1" value="${v}"><output>${v}</output>`;
+    d.querySelector('input').addEventListener('input', e => {
+      state.zones[i] = +e.target.value; d.querySelector('output').textContent = e.target.value; strands = null;
+    });
+    zonesEl.appendChild(d);
+  });
+}
+renderZones();
+function seg(id, onPick) {
+  $(id).addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    [...$(id).children].forEach(x => x.classList.toggle('on', x === b));
+    onPick(b.dataset.v);
+  });
+}
+seg('#style', v => { state.zones = [...PRESETS[v]]; renderZones(); strands = null; });
+seg('#curl', v => { state.curl = v; });
+seg('#volume', v => { state.volume = v; strands = null; });
+$('#opacity').addEventListener('input', e => { state.opacity = +e.target.value; $('#opOut').textContent = e.target.value; });
+$('#btnToggle').addEventListener('click', e => { state.show = !state.show; e.target.textContent = state.show ? '속눈썹 끄기' : '속눈썹 켜기'; });
+$('#btnMirror').addEventListener('click', () => { state.mirror = !state.mirror; });
+$('#btnSnap').addEventListener('click', () => {
+  const a = document.createElement('a'); a.download = 'lash-live.png'; a.href = canvas.toDataURL('image/png'); a.click();
+});
+
+// ---- Model ----
+const video = $('#video'), photo = $('#photo'), canvas = $('#canvas'), ctx = canvas.getContext('2d');
+const msg = $('#msg'), stats = $('#stats');
+let landmarker, strands = null, lastVideoTime = -1, frames = 0, tPrev = performance.now(), fps = 0;
+
+try {
+  const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  landmarker = await FaceLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task", delegate: "GPU" },
+    runningMode: "VIDEO", numFaces: 1,
+  });
+  msg.textContent = '카메라를 켜거나 사진을 올리세요';
+} catch (e) {
+  msg.textContent = '모델 로드 실패: ' + e.message; console.error(e);
+}
+
+$('#btnCam').addEventListener('click', async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    video.srcObject = stream; await video.play();
+    if (landmarker) await landmarker.setOptions({ runningMode: 'VIDEO' });
+    state.mode = 'video'; msg.textContent = ''; strands = null;
+    requestAnimationFrame(loop);
+  } catch (e) {
+    msg.textContent = '카메라를 열 수 없어요: ' + e.name + '. 인앱 브라우저면 Safari/Chrome으로 여세요.'; console.error(e);
+  }
+});
+
+$('#file').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  photo.src = URL.createObjectURL(f); await photo.decode();
+  if (video.srcObject) { video.srcObject.getTracks().forEach(t => t.stop()); video.srcObject = null; }
+  if (landmarker) await landmarker.setOptions({ runningMode: 'IMAGE' });
+  state.mode = 'image'; state.mirror = false; msg.textContent = ''; strands = null;
+  const res = landmarker.detect(photo);
+  drawFrame(photo, photo.naturalWidth, photo.naturalHeight, res.faceLandmarks?.[0]);
+  // 슬라이더 조작 시 다시 그리도록 루프
+  const redraw = () => { if (state.mode !== 'image') return; drawFrame(photo, photo.naturalWidth, photo.naturalHeight, res.faceLandmarks?.[0]); requestAnimationFrame(redraw); };
+  requestAnimationFrame(redraw);
+});
+
+function loop() {
+  if (state.mode !== 'video') return;
+  if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const res = landmarker.detectForVideo(video, performance.now());
+    drawFrame(video, video.videoWidth, video.videoHeight, res.faceLandmarks?.[0]);
+    frames++; const now = performance.now();
+    if (now - tPrev > 500) { fps = Math.round(frames * 1000 / (now - tPrev)); frames = 0; tPrev = now; }
+  }
+  requestAnimationFrame(loop);
+}
+
+// ---- Geometry ----
+const v2 = (x, y) => ({ x, y });
+const sub = (a, b) => v2(a.x - b.x, a.y - b.y), add = (a, b) => v2(a.x + b.x, a.y + b.y);
+const mul = (a, s) => v2(a.x * s, a.y * s), len = a => Math.hypot(a.x, a.y);
+const norm = a => { const l = len(a) || 1; return v2(a.x / l, a.y / l); };
+const rot = (a, r) => v2(a.x * Math.cos(r) - a.y * Math.sin(r), a.x * Math.sin(r) + a.y * Math.cos(r));
+const lerp = (a, b, t) => a + (b - a) * t;
+
+// polyline 위의 t(0~1) 지점과 접선
+function alongPolyline(pts, t) {
+  const segs = []; let total = 0;
+  for (let i = 0; i < pts.length - 1; i++) { const l = len(sub(pts[i + 1], pts[i])); segs.push(l); total += l; }
+  let d = t * total;
+  for (let i = 0; i < segs.length; i++) {
+    if (d <= segs[i] || i === segs.length - 1) {
+      const u = segs[i] ? Math.min(1, d / segs[i]) : 0;
+      const p = add(pts[i], mul(sub(pts[i + 1], pts[i]), u));
+      return { p, tan: norm(sub(pts[i + 1], pts[i])) };
+    }
+    d -= segs[i];
+  }
+}
+function zoneLength(t) { // t: 0 눈앞 → 1 눈꼬리, 5구간을 부드럽게 보간
+  const z = state.zones, x = t * (z.length - 1), i = Math.min(z.length - 2, Math.floor(x));
+  return lerp(z[i], z[i + 1], x - i);
+}
+
+// 가닥 배치는 눈당 한 번만 뽑고(seed), 프레임마다 위치만 다시 계산
+function makeStrands() {
+  const n = VOLUME[state.volume];
+  const mk = () => Array.from({ length: n }, (_, i) => ({
+    t: (i + 0.5) / n + (Math.random() - 0.5) * 0.6 / n,
+    lenJit: 0.88 + Math.random() * 0.24,
+    fan: (Math.random() - 0.5) * 0.25,
+    curlJit: 0.85 + Math.random() * 0.3,
+    w: 0.8 + Math.random() * 0.6,
+  }));
+  return { R: mk(), L: mk() };
+}
+
+function drawEye(lm, upperIdx, lowerIdx, side, W, H, faceUp) {
+  const P = i => v2(lm[i].x * W, lm[i].y * H);
+  let upper = upperIdx.map(P), lower = lowerIdx.map(P);
+  // 눈앞(안쪽) → 눈꼬리(바깥) 순으로 통일
+  if (side === 'R') { upper = upper.slice().reverse(); lower = lower.slice().reverse(); }
+  const inner = upper[0], outer = upper[upper.length - 1];
+  const width = len(sub(outer, inner));
+  const pxPerMm = width / 28;
+  // 눈 중심(가림/방향 기준)과 개방도
+  const cUp = upper[Math.floor(upper.length / 2)], cLo = lower[Math.floor(lower.length / 2)];
+  const center = mul(add(cUp, cLo), 0.5);
+  const openness = Math.min(1, len(sub(cUp, cLo)) / (width * 0.32)); // 0 감김 ~ 1 완전 뜸
+  const axis = norm(sub(outer, inner)); // 눈앞→눈꼬리
+  const list = strands[side];
+
+  ctx.lineCap = 'round';
+  for (const s of list) {
+    const { p, tan } = alongPolyline(upper, s.t);
+    // 접선에 수직, 눈 중심에서 멀어지는 쪽이 바깥(위)
+    let nrm = v2(-tan.y, tan.x);
+    if ((nrm.x * (p.x - center.x) + nrm.y * (p.y - center.y)) < 0) nrm = mul(nrm, -1);
+    // 눈이 감길수록 가닥이 눈꺼풀 방향(아래)으로 누움
+    nrm = norm(add(mul(nrm, 0.35 + 0.65 * openness), mul(faceUp, -(1 - openness) * 0.5)));
+    // 눈꼬리로 갈수록 바깥으로 부채꼴
+    const fanDir = norm(add(nrm, mul(axis, (s.t - 0.35) * 0.5 + s.fan)));
+    const L = zoneLength(s.t) * pxPerMm * s.lenJit;
+    const curl = CURL[state.curl] * s.curlJit;
+    // 컬은 얼굴 위쪽(faceUp) 방향으로 감김
+    const sign = Math.sign(fanDir.x * faceUp.y - fanDir.y * faceUp.x) || 1; // faceUp 쪽으로 도는 회전 방향
+    const d1 = rot(fanDir, -sign * curl * 0.45), d2 = rot(fanDir, -sign * curl);
+    const c1 = add(p, mul(fanDir, L * 0.4));
+    const c2 = add(p, add(mul(fanDir, L * 0.55), mul(d1, L * 0.3)));
+    const end = add(c2, mul(d2, L * 0.3));
+    // 테이퍼: 굵기 줄여가며 구간 분할
+    const segs = 5, base = (1.1 + 0.9 * pxPerMm / 6) * s.w;
+    let prev = p;
+    for (let k = 1; k <= segs; k++) {
+      const u = k / segs, q = bez(p, c1, c2, end, u);
+      ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(q.x, q.y);
+      ctx.lineWidth = Math.max(0.4, base * (1 - u * 0.8));
+      ctx.strokeStyle = `rgba(22,14,14,${state.opacity * (1 - u * 0.25)})`;
+      ctx.stroke(); prev = q;
+    }
+  }
+  return { width, openness };
+}
+function bez(p0, p1, p2, p3, t) {
+  const m = 1 - t;
+  return v2(
+    m*m*m*p0.x + 3*m*m*t*p1.x + 3*m*t*t*p2.x + t*t*t*p3.x,
+    m*m*m*p0.y + 3*m*m*t*p1.y + 3*m*t*t*p2.y + t*t*t*p3.y,
+  );
+}
+
+function drawFrame(src, W, H, lm) {
+  if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
+  ctx.save();
+  if (state.mirror) { ctx.translate(W, 0); ctx.scale(-1, 1); }
+  ctx.drawImage(src, 0, 0, W, H);
+  if (lm && state.show) {
+    if (!strands) strands = makeStrands();
+    // 얼굴 위 방향: 양 눈 중심 → 이마(10) 방향
+    const eyeMid = v2((lm[33].x + lm[263].x) / 2 * W, (lm[33].y + lm[263].y) / 2 * H);
+    const faceUp = norm(sub(v2(lm[10].x * W, lm[10].y * H), eyeMid));
+    ctx.shadowColor = 'rgba(0,0,0,0.25)'; ctx.shadowBlur = 1.2;
+    const r = drawEye(lm, R_UPPER, R_LOWER, 'R', W, H, faceUp);
+    const l = drawEye(lm, L_UPPER, L_LOWER, 'L', W, H, faceUp);
+    ctx.shadowBlur = 0;
+    stats.textContent = `${fps ? fps + ' fps · ' : ''}눈 너비 ${Math.round(r.width)}/${Math.round(l.width)}px · 개방도 ${r.openness.toFixed(2)}/${l.openness.toFixed(2)} · ${state.curl}컬 ${state.zones.join('-')}mm ${state.volume}`;
+  } else if (state.mode) {
+    stats.textContent = lm ? '속눈썹 꺼짐' : '얼굴을 못 찾았어요';
+  }
+  ctx.restore();
+}
+</script>
+</body>
+</html>

@@ -20,3 +20,9 @@
 ## 지금 단계
 
 **Phase 0 — 품질 검증.** 셀카 + 레퍼런스로 납득되는 합성이 나오는지 먼저 확인한다. 이게 안 나오면 나머지는 의미 없음.
+
+## 스파이크
+
+- `spikes/a-live-ar/` — 방식 A 실시간 파라미터 렌더링 데모. MediaPipe Face Landmarker + 2D 캔버스 가닥 렌더링. 컬 J/C/D, 구간별 길이 5개, 볼륨 3단계, 프리셋 3종.
+  - 실행: `python3 -m http.server 8787 --directory spikes/a-live-ar` → http://localhost:8787 (Chrome/Safari, 카메라 허용)
+  - 사진 업로드 모드도 됨 (Choose File)
