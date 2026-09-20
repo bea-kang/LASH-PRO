@@ -24,5 +24,6 @@
 ## 스파이크
 
 - `spikes/a-live-ar/` — 방식 A 실시간 파라미터 렌더링 데모. MediaPipe Face Landmarker + 2D 캔버스 가닥 렌더링. 컬 J/C/D, 구간별 길이 5개, 볼륨 3단계, 프리셋 3종.
-  - 실행: `python3 -m http.server 8787 --directory spikes/a-live-ar` → http://localhost:8787 (Chrome/Safari, 카메라 허용)
-  - 사진 업로드 모드도 됨 (Choose File)
+  - 레퍼런스 사진 → 래시 맵 번역: `server.py`의 `/api/lashmap`이 Claude(claude-opus-5) 비전 + structured output으로 컬·구간 길이·볼륨·스타일 JSON을 뽑아 바로 적용.
+  - 실행: `ANTHROPIC_API_KEY=... python3 spikes/a-live-ar/server.py` → http://localhost:8787 (Chrome/Safari, 카메라 허용). 키 없이 띄우면 번역만 안 되고 나머지는 동작.
+  - 사진 업로드 모드도 됨 (두 번째 Choose File)

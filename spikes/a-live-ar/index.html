@@ -32,6 +32,9 @@
   .zones output { display:block; font-size:12px; color:var(--muted); }
   input[type=range] { width:100%; accent-color:var(--accent); }
   .hint { color:var(--muted); font-size:12px; }
+  .ref { border:1px solid var(--line); border-radius:10px; padding:10px; display:flex; flex-direction:column; gap:8px; }
+  .ref .ok { color:#bfe3c0; }
+  .ref .err { color:#f2a0a0; }
   #stats { font-variant-numeric:tabular-nums; color:var(--muted); font-size:12px; }
 </style>
 </head>
@@ -50,6 +53,15 @@
       <input type="file" id="file" accept="image/*" style="max-width:150px">
     </div>
     <div class="hint" id="hint">인스타·카톡 안에서 열렸으면 카메라가 안 켜질 수 있어요. Safari/Chrome으로 여세요.</div>
+
+    <div class="ref">
+      <label>레퍼런스 사진 → 래시 맵</label>
+      <div class="row">
+        <input type="file" id="refFile" accept="image/*" style="max-width:150px">
+        <img id="refThumb" alt="" style="display:none;height:44px;border-radius:6px;object-fit:cover">
+      </div>
+      <div class="hint" id="refStatus">샵 시술 사진(스크린샷)을 올리면 컬·구간 길이·볼륨·스타일로 번역해서 바로 적용해요.</div>
+    </div>
 
     <div>
       <label>스타일 프리셋</label>
@@ -110,7 +122,8 @@ const PRESETS = {
   doll:    [9, 10, 12, 10, 9],
 };
 const CURL = { J: 0.35, C: 0.75, D: 1.15 };       // 끝단 회전(rad)
-const VOLUME = { natural: 42, volume: 70, mega: 105 }; // 눈당 가닥 수
+// 볼륨: 뿌리 수 × 뿌리당 가닥(부채꼴) 수
+const VOLUME = { natural: [40, 1], volume: [42, 2], mega: [44, 3] };
 
 const state = {
   zones: [...PRESETS.natural], curl: 'C', volume: 'natural',
@@ -148,6 +161,41 @@ $('#btnMirror').addEventListener('click', () => { state.mirror = !state.mirror; 
 $('#btnSnap').addEventListener('click', () => {
   const a = document.createElement('a'); a.download = 'lash-live.png'; a.href = canvas.toDataURL('image/png'); a.click();
 });
+
+// 서버 번역 결과 → 상태/UI 반영
+function setSeg(id, v) { [...$(id).children].forEach(x => x.classList.toggle('on', x.dataset.v === v)); }
+function applyLashMap(m) {
+  state.curl = m.curl; state.zones = [...m.zone_lengths_mm]; state.volume = m.volume;
+  setSeg('#curl', m.curl); setSeg('#volume', m.volume); setSeg('#style', m.style);
+  renderZones(); strands = null;
+}
+$('#refFile').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  const st = $('#refStatus'); st.className = 'hint'; st.textContent = '번역 중… (5~15초)';
+  const thumb = $('#refThumb'); thumb.src = URL.createObjectURL(f); thumb.style.display = '';
+  // 긴 변 1024px로 줄여서 전송 (비용·속도)
+  const dataUrl = await downscale(f, 1024);
+  try {
+    const r = await fetch('/api/lashmap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: dataUrl }) });
+    const m = await r.json();
+    if (!r.ok) throw new Error(m.error || r.status);
+    if (!m.is_lash_photo) { st.className = 'hint err'; st.textContent = '속눈썹 사진으로 안 보여요: ' + m.notes; return; }
+    applyLashMap(m);
+    st.className = 'hint ok';
+    st.textContent = `${m.curl}컬 · ${m.zone_lengths_mm.join('-')}mm · ${m.volume} · ${m.style} · 확신 ${Math.round(m.confidence * 100)}%
+${m.notes}`;
+  } catch (err) { st.className = 'hint err'; st.textContent = '실패: ' + err.message; }
+});
+function downscale(file, max) {
+  return new Promise(res => {
+    const img = new Image(); img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.width, img.height));
+      const c = document.createElement('canvas'); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      res(c.toDataURL('image/jpeg', 0.88)); URL.revokeObjectURL(img.src);
+    }; img.src = URL.createObjectURL(file);
+  });
+}
 
 // ---- Model ----
 const video = $('#video'), photo = $('#photo'), canvas = $('#canvas'), ctx = canvas.getContext('2d');
@@ -231,14 +279,25 @@ function zoneLength(t) { // t: 0 눈앞 → 1 눈꼬리, 5구간을 부드럽게
 
 // 가닥 배치는 눈당 한 번만 뽑고(seed), 프레임마다 위치만 다시 계산
 function makeStrands() {
-  const n = VOLUME[state.volume];
-  const mk = () => Array.from({ length: n }, (_, i) => ({
-    t: (i + 0.5) / n + (Math.random() - 0.5) * 0.6 / n,
-    lenJit: 0.88 + Math.random() * 0.24,
-    fan: (Math.random() - 0.5) * 0.25,
-    curlJit: 0.85 + Math.random() * 0.3,
-    w: 0.8 + Math.random() * 0.6,
-  }));
+  const [n, perRoot] = VOLUME[state.volume];
+  const mk = () => {
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const t = (i + 0.5) / n + (Math.random() - 0.5) * 0.6 / n;
+      // 눈앞 끝 5%는 아주 짧고 성글게 (실제 시술에서 안쪽은 비움)
+      if (t < 0.05 || t > 0.99) continue;
+      for (let k = 0; k < perRoot; k++) {
+        out.push({
+          t,
+          lenJit: (0.9 + Math.random() * 0.2) * (t < 0.12 ? 0.7 : 1),
+          fan: (k - (perRoot - 1) / 2) * 0.16 + (Math.random() - 0.5) * 0.12,
+          curlJit: 0.85 + Math.random() * 0.3,
+          w: 0.75 + Math.random() * 0.4,
+        });
+      }
+    }
+    return out;
+  };
   return { R: mk(), L: mk() };
 }
 
@@ -269,20 +328,22 @@ function drawEye(lm, upperIdx, lowerIdx, side, W, H, faceUp) {
     const fanDir = norm(add(nrm, mul(axis, (s.t - 0.35) * 0.5 + s.fan)));
     const L = zoneLength(s.t) * pxPerMm * s.lenJit;
     const curl = CURL[state.curl] * s.curlJit;
+    // 뿌리를 눈꺼풀 라인 살짝 안쪽에서 시작 (붙인 티 줄이기)
+    const root = sub(p, mul(nrm, pxPerMm * 0.5));
     // 컬은 얼굴 위쪽(faceUp) 방향으로 감김
     const sign = Math.sign(fanDir.x * faceUp.y - fanDir.y * faceUp.x) || 1; // faceUp 쪽으로 도는 회전 방향
     const d1 = rot(fanDir, -sign * curl * 0.45), d2 = rot(fanDir, -sign * curl);
-    const c1 = add(p, mul(fanDir, L * 0.4));
-    const c2 = add(p, add(mul(fanDir, L * 0.55), mul(d1, L * 0.3)));
+    const c1 = add(root, mul(fanDir, L * 0.4));
+    const c2 = add(root, add(mul(fanDir, L * 0.55), mul(d1, L * 0.3)));
     const end = add(c2, mul(d2, L * 0.3));
-    // 테이퍼: 굵기 줄여가며 구간 분할
-    const segs = 5, base = (1.1 + 0.9 * pxPerMm / 6) * s.w;
-    let prev = p;
+    // 테이퍼: 뿌리 굵고 진하게 → 끝은 가늘고 옅게
+    const segs = 6, base = (0.7 + 0.55 * pxPerMm / 6) * s.w;
+    let prev = root;
     for (let k = 1; k <= segs; k++) {
-      const u = k / segs, q = bez(p, c1, c2, end, u);
+      const u = k / segs, q = bez(root, c1, c2, end, u);
       ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(q.x, q.y);
-      ctx.lineWidth = Math.max(0.4, base * (1 - u * 0.8));
-      ctx.strokeStyle = `rgba(22,14,14,${state.opacity * (1 - u * 0.25)})`;
+      ctx.lineWidth = Math.max(0.35, base * (1 - u * 0.85));
+      ctx.strokeStyle = `rgba(14,9,11,${state.opacity * (1.05 - u * 0.4)})`;
       ctx.stroke(); prev = q;
     }
   }
@@ -306,7 +367,7 @@ function drawFrame(src, W, H, lm) {
     // 얼굴 위 방향: 양 눈 중심 → 이마(10) 방향
     const eyeMid = v2((lm[33].x + lm[263].x) / 2 * W, (lm[33].y + lm[263].y) / 2 * H);
     const faceUp = norm(sub(v2(lm[10].x * W, lm[10].y * H), eyeMid));
-    ctx.shadowColor = 'rgba(0,0,0,0.25)'; ctx.shadowBlur = 1.2;
+    ctx.shadowColor = 'rgba(0,0,0,0.35)'; ctx.shadowBlur = 0.8;
     const r = drawEye(lm, R_UPPER, R_LOWER, 'R', W, H, faceUp);
     const l = drawEye(lm, L_UPPER, L_LOWER, 'L', W, H, faceUp);
     ctx.shadowBlur = 0;
