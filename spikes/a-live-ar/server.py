@@ -18,28 +18,30 @@ LASHMAP_SCHEMA = {
     "properties": {
         "is_lash_photo": {"type": "boolean"},
         "curl": {"type": "string", "enum": ["J", "C", "D"]},
-        "zone_lengths_mm": {
-            "type": "array", "minItems": 5, "maxItems": 5,
-            "items": {"type": "integer", "minimum": 6, "maximum": 15},
-        },
+        # structured output은 minItems>1을 안 받아서 5구간을 개별 필드로
+        "len_inner_mm": {"type": "integer", "minimum": 6, "maximum": 15},
+        "len_inner_mid_mm": {"type": "integer", "minimum": 6, "maximum": 15},
+        "len_center_mm": {"type": "integer", "minimum": 6, "maximum": 15},
+        "len_outer_mid_mm": {"type": "integer", "minimum": 6, "maximum": 15},
+        "len_outer_mm": {"type": "integer", "minimum": 6, "maximum": 15},
         "volume": {"type": "string", "enum": ["natural", "volume", "mega"]},
         "style": {"type": "string", "enum": ["natural", "cat", "doll"]},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "notes": {"type": "string"},
     },
-    "required": ["is_lash_photo", "curl", "zone_lengths_mm", "volume", "style", "confidence", "notes"],
+    "required": ["is_lash_photo", "curl", "len_inner_mm", "len_inner_mid_mm", "len_center_mm", "len_outer_mid_mm", "len_outer_mm", "volume", "style", "confidence", "notes"],
     "additionalProperties": False,
 }
 
 PROMPT = """이 사진은 속눈썹 연장 샵의 시술 결과 레퍼런스입니다. 이 디자인을 다른 사람 눈에 재현하기 위한 래시 맵(시술 사양)으로 번역하세요.
 
 - curl: J(거의 직선, 살짝 올라감) / C(표준 컬) / D(강한 컬, 눈꺼풀 쪽으로 많이 감김)
-- zone_lengths_mm: 눈앞(내안각) → 눈꼬리(외안각) 순서로 5구간의 연장 길이(mm). 실제 샵 사양 범위(6~15mm)로. 사진의 자연 속눈썹 길이와 비교해 추정.
+- len_inner_mm → len_inner_mid_mm → len_center_mm → len_outer_mid_mm → len_outer_mm: 눈앞(내안각)부터 눈꼬리(외안각)까지 5구간의 연장 길이(mm). 실제 샵 사양 범위(6~15mm)로. 사진의 자연 속눈썹 길이와 비교해 추정.
 - volume: natural(1:1 클래식, 성근 느낌) / volume(2~4D, 촘촘) / mega(5D 이상, 매우 빽빽)
 - style: natural(균일) / cat(눈꼬리로 갈수록 길어짐) / doll(중앙이 가장 김)
 - confidence: 사진이 눈을 감고 있거나 접사라 열린 눈 상태를 추정해야 하면 낮게.
 - notes: 한 줄. 특징(예: "눈꼬리 3구간만 길게, 컬러 브라운") 또는 추정 근거.
-- 속눈썹 사진이 아니면 is_lash_photo=false 로 하고 나머지는 기본값(C, [8,9,10,10,9], natural, natural, 0).
+- 속눈썹 사진이 아니면 is_lash_photo=false 로 하고 나머지는 기본값(C, 8-9-10-10-9, natural, natural, 0).
 """
 
 
@@ -61,6 +63,7 @@ def translate(image_b64: str, media_type: str) -> dict:
         raise RuntimeError("model refused")
     text = next(b.text for b in resp.content if b.type == "text")
     data = json.loads(text)
+    data["zone_lengths_mm"] = [data.pop(k) for k in ("len_inner_mm", "len_inner_mid_mm", "len_center_mm", "len_outer_mid_mm", "len_outer_mm")]
     data["_usage"] = {"in": resp.usage.input_tokens, "out": resp.usage.output_tokens}
     return data
 
