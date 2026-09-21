@@ -516,11 +516,26 @@ function buildLiveLayer(before, after, lm, W, H) {
       diff[i] = la - lb;
     }
     const sorted = Float32Array.from(diff).sort(); const med = sorted[n >> 1];
+    // 윗눈꺼풀 라인 (x → y) : 이 라인 위 0.8w ~ 아래 0.12w 띠 안에서만 속눈썹으로 인정
+    const lidPts = (e.inner === 133 ? R_UPPER : L_UPPER).map(P).sort((p, q) => p.x - q.x);
+    const lidY = x => {
+      if (x <= lidPts[0].x) return lidPts[0].y;
+      for (let j = 1; j < lidPts.length; j++) if (x <= lidPts[j].x) {
+        const u = (x - lidPts[j-1].x) / ((lidPts[j].x - lidPts[j-1].x) || 1);
+        return lerp(lidPts[j-1].y, lidPts[j].y, u);
+      }
+      return lidPts[lidPts.length - 1].y;
+    };
     const sprite = document.createElement('canvas'); sprite.width = rw; sprite.height = rh;
     const sctx = sprite.getContext('2d'); const out = sctx.createImageData(rw, rh); const o = out.data;
     for (let i = 0; i < n; i++) {
+      const px = rx + (i % rw), py = ry + Math.floor(i / rw);
+      const dy = py - lidY(px);                        // 음수 = 라인 위
+      let band = 1;
+      if (dy > w * 0.12 || dy < -w * 0.8) band = 0;
+      else if (dy < -w * 0.6) band = (dy + w * 0.8) / (w * 0.2);   // 위쪽 끝 페더
       const darkening = -(diff[i] - med);              // 양수 = 전보다 어두워짐 = 속눈썹일 가능성
-      const alpha = Math.max(0, Math.min(1, (darkening - 14) / 45));
+      const alpha = Math.max(0, Math.min(1, (darkening - 16) / 45)) * band;
       o[i*4] = a[i*4]; o[i*4+1] = a[i*4+1]; o[i*4+2] = a[i*4+2]; o[i*4+3] = Math.round(alpha * 255);
     }
     sctx.putImageData(out, 0, 0);
@@ -565,18 +580,20 @@ $('#btnTryon').addEventListener('click', async () => {
   // 원본 프레임 스냅샷 (거울 반전 없이 원 좌표계)
   const before = document.createElement('canvas'); before.width = W; before.height = H;
   before.getContext('2d').drawImage(lastSrc, 0, 0, W, H);
-  // 양쪽 눈 바운딩 박스 + 여백 → 크롭 사각형 (눈썹까지 포함되게 위로 넉넉히)
+  // 양쪽 눈 바운딩 박스 → 3:2 크롭 (gpt-image-1 출력이 1536x1024 고정이라 비율을 맞춰야 전/후가 정렬됨)
   const ids = [33, 133, 362, 263, 159, 145, 386, 374];
   const xs = ids.map(i => lm[i].x * W), ys = ids.map(i => lm[i].y * H);
-  const bw = Math.max(...xs) - Math.min(...xs), bh = Math.max(...ys) - Math.min(...ys);
+  const bw = Math.max(...xs) - Math.min(...xs);
   const cx = (Math.max(...xs) + Math.min(...xs)) / 2, cy = (Math.max(...ys) + Math.min(...ys)) / 2;
-  let cw = bw * 1.5, ch = Math.max(bh * 4, cw * 0.45);
-  let x0 = Math.max(0, Math.round(cx - cw / 2)), y0 = Math.max(0, Math.round(cy - ch * 0.55));
-  cw = Math.min(W - x0, Math.round(cw)); ch = Math.min(H - y0, Math.round(ch));
-  // 크롭을 최소 1024px 폭으로 업스케일해서 전송 (모델이 디테일을 볼 수 있게)
-  const up = Math.max(1, 1024 / cw);
-  const crop = document.createElement('canvas'); crop.width = Math.round(cw * up); crop.height = Math.round(ch * up);
-  crop.getContext('2d').drawImage(before, x0, y0, cw, ch, 0, 0, crop.width, crop.height);
+  const OUT_W = 1536, OUT_H = 1024, AR = OUT_W / OUT_H;
+  let cw = bw * 1.7, ch = cw / AR;
+  if (cw > W) { cw = W; ch = cw / AR; }
+  if (ch > H) { ch = H; cw = ch * AR; }
+  cw = Math.round(cw); ch = Math.round(ch);
+  let x0 = Math.round(cx - cw / 2), y0 = Math.round(cy - ch * 0.5);
+  x0 = Math.max(0, Math.min(W - cw, x0)); y0 = Math.max(0, Math.min(H - ch, y0));
+  const crop = document.createElement('canvas'); crop.width = OUT_W; crop.height = OUT_H;
+  crop.getContext('2d').drawImage(before, x0, y0, cw, ch, 0, 0, OUT_W, OUT_H);
   const frameUrl = crop.toDataURL('image/jpeg', 0.92);
 
   $('#btnTryon').disabled = true; st.className = 'hint'; st.textContent = '합성 중… (5~20초)';
