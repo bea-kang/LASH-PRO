@@ -389,8 +389,8 @@ function drawEye(lm, upperIdx, lowerIdx, side, W, H, faceUp) {
     const L = zoneLength(s.t) * pxPerMm * s.lenJit;
     const curl = CURL[state.curl] * s.curlJit;
     // MediaPipe 윗눈꺼풀 점은 눈 구멍 안쪽 가장자리라, 실제 속눈썹 라인은 그보다 바깥(피부 쪽).
-    // 뿌리를 바깥으로 0.6mm 올려 흰자를 덮지 않게 함
-    const root = add(p, mul(nrm, pxPerMm * 0.6));
+    // 뿌리를 바깥으로 0.25mm만 올림 (0.6은 눈꺼풀 피부 위로 떠 보임, 0은 흰자를 덮음)
+    const root = add(p, mul(nrm, pxPerMm * 0.25));
     // 컬은 얼굴 위쪽(faceUp) 방향으로 감김
     const sign = Math.sign(fanDir.x * faceUp.y - fanDir.y * faceUp.x) || 1; // faceUp 쪽으로 도는 회전 방향
     const d1 = rot(fanDir, -sign * curl * 0.45), d2 = rot(fanDir, -sign * curl);
