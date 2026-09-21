@@ -102,6 +102,12 @@ def translate(image_b64: str, media_type: str) -> dict:
     return data
 
 
+TRYON_PROMPT = """Image 1 is a close-up photo of a person's eyes. Image 2 is a reference photo of eyelash extensions done at a lash salon.
+Edit image 1 so the person is wearing eyelash extensions that reproduce image 2 as faithfully as possible: the same curl, the same lengths per zone (inner corner to outer corner), the same density, the same spiky/wispy or even pattern, the same lash color.
+Keep everything else in image 1 exactly as it is: eye shape and size, eyelids, skin texture, iris, eyebrows, lighting, framing, resolution. Do not enlarge the eyes, do not retouch the skin, do not add eyeliner or other makeup, do not change the face.
+Return only the edited version of image 1, same size and framing."""
+
+
 def split_data_url(data_url: str):
     header, b64 = data_url.split(",", 1)
     return header[5:].split(";")[0], b64
