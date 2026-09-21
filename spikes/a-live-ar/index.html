@@ -22,6 +22,7 @@
   label { color:var(--muted); font-size:12px; display:block; margin-bottom:4px; }
   select, button, input[type=file] { background:#222228; color:var(--fg); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font:inherit; }
   button.primary { background:var(--accent); color:#1a0e12; border-color:transparent; font-weight:600; }
+  button.ghost { background:transparent; color:var(--muted); }
   button:disabled { opacity:.5; }
   .seg { display:flex; gap:4px; }
   .seg button { flex:1; padding:7px 0; }
@@ -48,19 +49,24 @@
     <div class="msg" id="msg">모델 불러오는 중…</div>
   </section>
   <aside>
-    <div class="row">
-      <button class="primary" id="btnCam">카메라 켜기</button>
-      <input type="file" id="file" accept="image/*" style="max-width:150px">
+    <div>
+      <label>1. 내 눈</label>
+      <div class="row">
+        <button class="primary" id="btnCam">카메라 켜기</button>
+        <button id="btnPhoto" class="ghost">셀카 사진으로 대신 테스트</button>
+        <input type="file" id="file" accept="image/*" hidden>
+      </div>
+      <div class="hint" id="hint">인스타·카톡 안에서 열렸으면 카메라가 안 켜질 수 있어요. Safari/Chrome으로 여세요.</div>
     </div>
-    <div class="hint" id="hint">인스타·카톡 안에서 열렸으면 카메라가 안 켜질 수 있어요. Safari/Chrome으로 여세요.</div>
 
     <div class="ref">
-      <label>레퍼런스 사진 → 래시 맵</label>
+      <label>2. 레퍼런스 (샵 시술 사진) → 래시 맵</label>
       <div class="row">
-        <input type="file" id="refFile" accept="image/*" style="max-width:150px">
+        <button class="primary" id="btnRef">레퍼런스 사진 올리기</button>
+        <input type="file" id="refFile" accept="image/*" hidden>
         <img id="refThumb" alt="" style="display:none;height:44px;border-radius:6px;object-fit:cover">
       </div>
-      <div class="hint" id="refStatus">샵 시술 사진(스크린샷)을 올리면 컬·구간 길이·볼륨·스타일로 번역해서 바로 적용해요.</div>
+      <div class="hint" id="refStatus">인스타 스크린샷을 올리면 컬·구간 길이·볼륨·스타일로 번역해서 내 눈에 바로 적용해요. 카메라 화면은 그대로예요.</div>
     </div>
 
     <div>
@@ -213,13 +219,15 @@ try {
   msg.textContent = '모델 로드 실패: ' + e.message; console.error(e);
 }
 
+$('#btnPhoto').addEventListener('click', () => $('#file').click());
+$('#btnRef').addEventListener('click', () => $('#refFile').click());
 $('#btnCam').addEventListener('click', async () => {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
     video.srcObject = stream; await video.play();
     if (landmarker) await landmarker.setOptions({ runningMode: 'VIDEO' });
-    state.mode = 'video'; msg.textContent = ''; strands = null;
-    requestAnimationFrame(loop);
+    state.mode = 'video'; state.mirror = true; msg.textContent = ''; strands = null;
+    lastVideoTime = -1; requestAnimationFrame(loop);
   } catch (e) {
     msg.textContent = '카메라를 열 수 없어요: ' + e.name + '. 인앱 브라우저면 Safari/Chrome으로 여세요.'; console.error(e);
   }
