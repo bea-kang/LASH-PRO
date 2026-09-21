@@ -78,6 +78,8 @@
           <button id="btnPixelOff" style="display:none">떼기</button>
         </div>
         <div class="hint" id="pickStatus">순서: 눈앞(코 쪽 끝) → 눈꼬리(바깥 끝) → 윗눈꺼풀 라인 중앙(속눈썹 뿌리). 확대해서 찍으려면 트랙패드로 핀치.</div>
+        <label>길이 배율 <output id="scaleOut">1.0</output>×</label>
+        <input type="range" id="lashScale" min="0.6" max="2" step="0.05" value="1">
       </div>
     </div>
 
@@ -183,7 +185,7 @@ const VOLUME = { natural: [40, 1], volume: [42, 2], mega: [44, 3] };
 const state = {
   zones: [...PRESETS.natural], curl: 'C', volume: 'natural',
   opacity: 0.85, show: true, mirror: true, mode: null, // 'video' | 'image'
-  texture: 'even', zoom: true, engine: 'openai',
+  texture: 'even', zoom: true, engine: 'openai', lashScale: 1,
 };
 // 눈 확대 보기: 프레임 간 부드럽게 따라가는 뷰 상태
 const view = { cx: 0, cy: 0, z: 1, init: false };
@@ -632,9 +634,11 @@ function drawLiveLayer(c, lm, W, H, smooth = true) {
   liveLayer.eyes.forEach((eye, i) => {
     const now = eyeAnchors(lm, EYES[i], W, H);
     if (eye.pixel) {
-      eye.openAtCapture = Math.max(eye.openAtCapture === 0.3 ? 0 : eye.openAtCapture, now.openRatio);
-      const k = Math.max(0.25, Math.min(1.15, now.openRatio / Math.max(0.05, eye.openAtCapture)));
-      drawPixelEye(c, eye, lm, i, W, H, k);
+      // 기준 개방도: 감쇠하는 최대값. 랜드마크가 한 프레임 튀어도 몇 초 안에 정상으로 돌아옴
+      eye.openRef = Math.max((eye.openRef || 0) * 0.99, now.openRatio);
+      const r = now.openRatio / Math.max(0.05, eye.openRef);
+      const k = r > 0.85 ? 1 : Math.max(0.3, r);   // 눈 떠 있으면 원래 길이, 감길 때만 눌림
+      drawPixelEye(c, eye, lm, i, W, H, k * state.lashScale);
       return;
     }
     // 깜빡임: 개방도 비율만큼 세로로 눌림 (0.25~1.15로 제한)
@@ -672,6 +676,7 @@ pickCanvas.addEventListener('click', e => {
   drawPick();
 });
 $('#pickReset').addEventListener('click', () => { pick.pts = []; pick.auto = false; drawPick(); });
+$('#lashScale').addEventListener('input', e => { state.lashScale = +e.target.value; $('#scaleOut').textContent = (+e.target.value).toFixed(2); });
 
 // 레퍼런스에서 윗눈꺼풀 띠 안의 어두운 가닥만 알파로 떼어낸 스프라이트 (한쪽 눈)
 function extractRefLashes() {
