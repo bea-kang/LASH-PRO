@@ -1,6 +1,7 @@
 """spike A dev server: static files + POST /api/lashmap (reference photo -> lash map JSON).
 
-Run:  ANTHROPIC_API_KEY=... python3 server.py  (port 8787)
+Run:  python3 server.py  (port 8787)
+Key:  같은 폴더의 .env 에 ANTHROPIC_API_KEY=sk-ant-... 한 줄 (gitignore됨), 또는 환경변수.
 """
 import base64
 import json
@@ -12,6 +13,23 @@ import anthropic
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL = "claude-opus-5"
+
+
+def load_dotenv():
+    """spikes/a-live-ar/.env 의 KEY=VALUE 를 환경변수로 (이미 있으면 건드리지 않음)."""
+    path = os.path.join(HERE, ".env")
+    if not os.path.exists(path):
+        return
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+load_dotenv()
 
 LASHMAP_SCHEMA = {
     "type": "object",
@@ -91,7 +109,7 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path != "/api/lashmap":
             return self._json(404, {"error": "not found"})
         if not os.environ.get("ANTHROPIC_API_KEY"):
-            return self._json(500, {"error": "ANTHROPIC_API_KEY가 없어요. 서버를 ANTHROPIC_API_KEY=... 로 실행하세요."})
+            return self._json(500, {"error": "ANTHROPIC_API_KEY가 없어요. spikes/a-live-ar/.env 에 ANTHROPIC_API_KEY=sk-ant-... 를 넣고 서버를 다시 띄우세요."})
         n = int(self.headers.get("Content-Length", 0))
         try:
             req = json.loads(self.rfile.read(n))
