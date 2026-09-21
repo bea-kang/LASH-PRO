@@ -1,7 +1,7 @@
-"""spike A dev server: static files + POST /api/lashmap (reference photo -> lash map JSON).
+"""spike dev server: static files + /api/lashmap (사진 -> 래시 맵 JSON) + /api/tryon (사진 그대로 합성).
 
 Run:  python3 server.py  (port 8787)
-Key:  같은 폴더의 .env 에 ANTHROPIC_API_KEY=sk-ant-... 한 줄 (gitignore됨), 또는 환경변수.
+Keys: 같은 폴더의 .env (gitignore됨). OPENAI_API_KEY 하나로 다 됨. GEMINI_API_KEY 는 비교용 선택.
 """
 import base64
 import json
@@ -12,11 +12,10 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import urllib.error
 import urllib.request
 
-import anthropic
 import requests
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MODEL = "claude-opus-5"
+OPENAI_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4.1")
 GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
 OPENAI_IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
 
@@ -72,36 +71,35 @@ PROMPT = """이 사진은 속눈썹 연장 샵의 시술 결과 레퍼런스입�
 
 
 def translate(image_b64: str, media_type: str) -> dict:
-    client = anthropic.Anthropic()
-    resp = client.messages.create(
-        model=MODEL,
-        max_tokens=2048,
-        messages=[{
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY가 없어요. spikes/a-live-ar/.env 에 OPENAI_API_KEY=sk-... 를 넣고 서버를 다시 띄우세요.")
+    body = {
+        "model": OPENAI_VISION_MODEL,
+        "messages": [{
             "role": "user",
             "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
+                {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}", "detail": "high"}},
                 {"type": "text", "text": PROMPT},
             ],
         }],
-        output_config={"format": {"type": "json_schema", "schema": LASHMAP_SCHEMA}},
-    )
-    if resp.stop_reason == "refusal":
-        raise RuntimeError("model refused")
-    text = next(b.text for b in resp.content if b.type == "text")
-    data = json.loads(text)
+        "response_format": {"type": "json_schema", "json_schema": {"name": "lash_map", "strict": True, "schema": LASHMAP_SCHEMA}},
+    }
+    r = requests.post("https://api.openai.com/v1/chat/completions", headers={"Authorization": f"Bearer {key}"}, json=body, timeout=120)
+    if r.status_code != 200:
+        raise RuntimeError(f"OpenAI {r.status_code}: {r.text[:600]}")
+    msg = r.json()["choices"][0]["message"]
+    if msg.get("refusal"):
+        raise RuntimeError("model refused: " + msg["refusal"])
+    data = json.loads(msg["content"])
     data["zone_lengths_mm"] = [
         max(6, min(15, int(data.pop(k))))
         for k in ("len_inner_mm", "len_inner_mid_mm", "len_center_mm", "len_outer_mid_mm", "len_outer_mm")
     ]
     data["confidence"] = max(0.0, min(1.0, float(data["confidence"])))
-    data["_usage"] = {"in": resp.usage.input_tokens, "out": resp.usage.output_tokens}
+    u = r.json().get("usage", {})
+    data["_usage"] = {"in": u.get("prompt_tokens"), "out": u.get("completion_tokens")}
     return data
-
-
-TRYON_PROMPT = """Image 1 is a close-up photo of a person's eyes. Image 2 is a reference photo of eyelash extensions done at a lash salon.
-Edit image 1 so the person is wearing eyelash extensions that reproduce image 2 as faithfully as possible: the same curl, the same lengths per zone (inner corner to outer corner), the same density, the same spiky/wispy or even pattern, the same lash color.
-Keep everything else in image 1 exactly as it is: eye shape and size, eyelids, skin texture, iris, eyebrows, lighting, framing, resolution. Do not enlarge the eyes, do not retouch the skin, do not add eyeliner or other makeup, do not change the face.
-Return only the edited version of image 1, same size and framing."""
 
 
 def split_data_url(data_url: str):
@@ -200,8 +198,6 @@ class Handler(SimpleHTTPRequestHandler):
             return self.do_tryon()
         if self.path != "/api/lashmap":
             return self._json(404, {"error": "not found"})
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            return self._json(500, {"error": "ANTHROPIC_API_KEY가 없어요. spikes/a-live-ar/.env 에 ANTHROPIC_API_KEY=sk-ant-... 를 넣고 서버를 다시 띄우세요."})
         n = int(self.headers.get("Content-Length", 0))
         try:
             req = json.loads(self.rfile.read(n))
@@ -213,15 +209,10 @@ class Handler(SimpleHTTPRequestHandler):
             result = translate(b64, media_type)
             sys.stderr.write("lashmap: %s\n" % json.dumps(result, ensure_ascii=False))
             return self._json(200, result)
-        except anthropic.AuthenticationError:
-            return self._json(401, {"error": "API 키가 잘못됐어요."})
-        except anthropic.RateLimitError:
-            return self._json(429, {"error": "요청이 많아요. 잠시 후 다시."})
-        except anthropic.APIStatusError as e:
-            return self._json(e.status_code, {"error": f"API {e.status_code}: {e.message}"})
-        except anthropic.APIConnectionError as e:
+        except requests.ConnectionError as e:
             return self._json(502, {"error": f"연결 실패: {e}"})
         except Exception as e:  # noqa: BLE001
+            sys.stderr.write("lashmap: ERR %s\n" % e)
             return self._json(500, {"error": str(e)})
 
 
@@ -244,5 +235,5 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8787
-    print(f"spike A/B on http://localhost:{port}  (anthropic key: {'yes' if os.environ.get('ANTHROPIC_API_KEY') else 'NO'}, gemini: {'yes' if os.environ.get('GEMINI_API_KEY') else 'NO'} [{GEMINI_IMAGE_MODEL}], openai: {'yes' if os.environ.get('OPENAI_API_KEY') else 'NO'} [{OPENAI_IMAGE_MODEL}])", flush=True)
+    print(f"spike A/B on http://localhost:{port}  (openai key: {'yes' if os.environ.get('OPENAI_API_KEY') else 'NO'} [vision {OPENAI_VISION_MODEL}], gemini: {'yes' if os.environ.get('GEMINI_API_KEY') else 'NO'} [{GEMINI_IMAGE_MODEL}], openai: {'yes' if os.environ.get('OPENAI_API_KEY') else 'NO'} [{OPENAI_IMAGE_MODEL}])", flush=True)
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
