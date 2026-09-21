@@ -246,6 +246,16 @@ $('#refFile').addEventListener('change', async e => {
     if (!r.ok) throw new Error(m.error || r.status);
     if (!m.is_lash_photo) { st.className = 'hint err'; st.textContent = '속눈썹 사진으로 안 보여요: ' + m.notes; return; }
     applyLashMap(m); lastMap = m;
+    // 자동 3점: 비전 모델이 준 정규화 좌표 → 레퍼런스 픽셀. 틀리면 '점 다시 찍기'로 수동
+    if (refImg && [m.inner_corner_x, m.inner_corner_y, m.outer_corner_x, m.outer_corner_y, m.lash_root_center_x, m.lash_root_center_y].every(v => typeof v === 'number')) {
+      pick.pts = [
+        v2(m.inner_corner_x * refImg.width, m.inner_corner_y * refImg.height),
+        v2(m.outer_corner_x * refImg.width, m.outer_corner_y * refImg.height),
+        v2(m.lash_root_center_x * refImg.width, m.lash_root_center_y * refImg.height),
+      ];
+      pick.auto = true; autoPts = pick.pts.map(p => ({ ...p })); drawPick();
+      $('#pickStatus').className = 'hint'; $('#pickStatus').textContent = '자동으로 찍은 점이에요 (분홍=눈앞, 파랑=눈꼬리, 노랑=뿌리 중앙). 어긋나면 "점 다시 찍기"로 직접 찍어요.';
+    }
     st.className = 'hint ok';
     st.textContent = `${m.curl}컬 · ${m.zone_lengths_mm.join('-')}mm · ${m.volume} · ${m.style} · 확신 ${Math.round(m.confidence * 100)}%
 ${m.notes}`;
@@ -637,6 +647,8 @@ function drawLiveLayer(c, lm, W, H, smooth = true) {
 // ---- 방식 C: 레퍼런스 속눈썹 픽셀 이식 ----
 const pickCanvas = $('#pickCanvas'), pctx = pickCanvas.getContext('2d');
 const PICK_LABELS = ['① 눈앞(안쪽 끝)', '② 눈꼬리(바깥 끝)', '③ 윗눈꺼풀 라인 중앙', '완료 — 아래 버튼'];
+// 자동 점 정확도 기록용: 수동으로 다시 찍으면 자동 점과의 거리(눈 너비 대비)를 로그
+let autoPts = null;
 function drawPick() {
   if (!refImg) return;
   pickCanvas.width = refImg.width; pickCanvas.height = refImg.height;
@@ -653,7 +665,7 @@ pickCanvas.addEventListener('click', e => {
   pick.pts.push(v2((e.clientX - r.left) * pickCanvas.width / r.width, (e.clientY - r.top) * pickCanvas.height / r.height));
   drawPick();
 });
-$('#pickReset').addEventListener('click', () => { pick.pts = []; drawPick(); });
+$('#pickReset').addEventListener('click', () => { pick.pts = []; pick.auto = false; drawPick(); });
 
 // 레퍼런스에서 윗눈꺼풀 띠 안의 어두운 가닥만 알파로 떼어낸 스프라이트 (한쪽 눈)
 function extractRefLashes() {
@@ -712,6 +724,12 @@ function mirrorSprite(L) {
 }
 $('#btnPixel').addEventListener('click', () => {
   if (pick.pts.length < 3 || !lastLm) { $('#pickStatus').textContent = '카메라를 먼저 켜고 얼굴이 잡힌 상태에서 눌러요.'; return; }
+  if (autoPts && !pick.auto) { // 수동 보정 시 자동 점 오차 기록 (눈 너비 대비 %)
+    const w = len(sub(pick.pts[1], pick.pts[0])) || 1;
+    const errs = pick.pts.map((p, j) => Math.round(len(sub(p, autoPts[j])) / w * 100));
+    console.log('auto-point error % of eye width [inner, outer, root]:', errs);
+    fetch('/api/feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: 'auto-points', note: 'err% ' + errs.join('/') }) }).catch(() => {});
+  }
   const one = extractRefLashes(), two = mirrorSprite(one);
   // 레퍼런스가 이미지상 왼쪽 눈인지 오른쪽 눈인지: 눈앞이 눈꼬리보다 오른쪽이면 이미지 왼쪽 눈(피사체 오른눈)
   const [inner, outer] = pick.pts;

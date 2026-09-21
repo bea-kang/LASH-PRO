@@ -51,10 +51,14 @@ LASHMAP_SCHEMA = {
         "volume": {"type": "string", "enum": ["natural", "volume", "mega"]},
         "style": {"type": "string", "enum": ["natural", "cat", "doll"]},
         "texture": {"type": "string", "enum": ["even", "wispy"]},
+        # 레퍼런스 눈 기준점 (이미지 폭·높이 대비 0~1). 눈이 여러 개면 가장 크고 선명한 눈 하나
+        "inner_corner_x": {"type": "number"}, "inner_corner_y": {"type": "number"},
+        "outer_corner_x": {"type": "number"}, "outer_corner_y": {"type": "number"},
+        "lash_root_center_x": {"type": "number"}, "lash_root_center_y": {"type": "number"},
         "confidence": {"type": "number"},
         "notes": {"type": "string"},
     },
-    "required": ["is_lash_photo", "curl", "len_inner_mm", "len_inner_mid_mm", "len_center_mm", "len_outer_mid_mm", "len_outer_mm", "volume", "style", "texture", "confidence", "notes"],
+    "required": ["is_lash_photo", "curl", "len_inner_mm", "len_inner_mid_mm", "len_center_mm", "len_outer_mid_mm", "len_outer_mm", "volume", "style", "texture", "inner_corner_x", "inner_corner_y", "outer_corner_x", "outer_corner_y", "lash_root_center_x", "lash_root_center_y", "confidence", "notes"],
     "additionalProperties": False,
 }
 
@@ -65,6 +69,7 @@ PROMPT = """이 사진은 속눈썹 연장 샵의 시술 결과 레퍼런스입�
 - volume: natural(1:1 클래식, 성근 느낌) / volume(2~4D, 촘촘) / mega(5D 이상, 매우 빽빽)
 - style: natural(균일) / cat(눈꼬리로 갈수록 길어짐) / doll(중앙이 가장 김)
 - texture: even(길이가 고르게 정렬된 클래식/볼륨) / wispy(몇 가닥씩 뾰족하게 모여 스파이크를 이루는 요정·위스피 스타일. 긴 스파이크와 짧은 베이스가 번갈아 보임)
+- inner_corner / outer_corner / lash_root_center: 사진에서 가장 크고 선명한 눈 하나의 기준점. 이미지 폭·높이 대비 0~1 좌표. inner_corner는 코 쪽 눈구석(눈물점), outer_corner는 바깥 눈꼬리 끝, lash_root_center는 윗눈꺼풀 속눈썹 뿌리 라인의 한가운데(눈동자 위쪽 라인). 눈이 감겨 있어도 라인 기준으로.
 - confidence: 0~1. 사진이 눈을 감고 있거나 접사라 열린 눈 상태를 추정해야 하면 낮게.
 - notes: 한 줄. 특징(예: "눈꼬리 3구간만 길게, 컬러 브라운") 또는 추정 근거.
 - 속눈썹 사진이 아니면 is_lash_photo=false 로 하고 나머지는 기본값(C, 8-9-10-10-9, natural, natural, even, 0).
