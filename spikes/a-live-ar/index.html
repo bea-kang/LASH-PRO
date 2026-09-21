@@ -163,6 +163,7 @@ const state = {
 };
 // 눈 확대 보기: 프레임 간 부드럽게 따라가는 뷰 상태
 const view = { cx: 0, cy: 0, z: 1, init: false };
+const openMax = { R: 0.2, L: 0.2 }; // 눈별 최대 개방 비율(높이/너비) 추적
 
 // ---- UI ----
 const $ = s => document.querySelector(s);
@@ -368,7 +369,9 @@ function drawEye(lm, upperIdx, lowerIdx, side, W, H, faceUp) {
   // 눈 중심(가림/방향 기준)과 개방도
   const cUp = upper[Math.floor(upper.length / 2)], cLo = lower[Math.floor(lower.length / 2)];
   const center = mul(add(cUp, cLo), 0.5);
-  const openness = Math.min(1, len(sub(cUp, cLo)) / (width * 0.32)); // 0 감김 ~ 1 완전 뜸
+  const ratio = len(sub(cUp, cLo)) / width;
+  openMax[side] = Math.max(openMax[side] * 0.999, ratio); // 천천히 감쇠해서 자세 변화에도 적응
+  const openness = Math.min(1, ratio / openMax[side]);    // 0 감김 ~ 1 이 사람의 완전 뜬 상태
   const axis = norm(sub(outer, inner)); // 눈앞→눈꼬리
   const list = strands[side];
 
@@ -378,14 +381,16 @@ function drawEye(lm, upperIdx, lowerIdx, side, W, H, faceUp) {
     // 접선에 수직, 눈 중심에서 멀어지는 쪽이 바깥(위)
     let nrm = v2(-tan.y, tan.x);
     if ((nrm.x * (p.x - center.x) + nrm.y * (p.y - center.y)) < 0) nrm = mul(nrm, -1);
-    // 눈이 감길수록 가닥이 눈꺼풀 방향(아래)으로 누움
-    nrm = norm(add(mul(nrm, 0.35 + 0.65 * openness), mul(faceUp, -(1 - openness) * 0.5)));
+    // 절반 이상 감겼을 때만 가닥을 눈꺼풀 방향(아래)으로 눕힘. 평소엔 랜드마크 접선에 수직 그대로
+    const closing = Math.max(0, 0.5 - openness) * 2; // 0(뜸) ~ 1(감김)
+    nrm = norm(add(mul(nrm, 1 - 0.65 * closing), mul(faceUp, -closing * 0.6)));
     // 눈꼬리로 갈수록 바깥으로 부채꼴
     const fanDir = norm(add(nrm, mul(axis, (s.t - 0.35) * 0.5 + s.fan)));
     const L = zoneLength(s.t) * pxPerMm * s.lenJit;
     const curl = CURL[state.curl] * s.curlJit;
-    // 뿌리를 눈꺼풀 라인 살짝 안쪽에서 시작 (붙인 티 줄이기)
-    const root = sub(p, mul(nrm, pxPerMm * 0.5));
+    // MediaPipe 윗눈꺼풀 점은 눈 구멍 안쪽 가장자리라, 실제 속눈썹 라인은 그보다 바깥(피부 쪽).
+    // 뿌리를 바깥으로 0.6mm 올려 흰자를 덮지 않게 함
+    const root = add(p, mul(nrm, pxPerMm * 0.6));
     // 컬은 얼굴 위쪽(faceUp) 방향으로 감김
     const sign = Math.sign(fanDir.x * faceUp.y - fanDir.y * faceUp.x) || 1; // faceUp 쪽으로 도는 회전 방향
     const d1 = rot(fanDir, -sign * curl * 0.45), d2 = rot(fanDir, -sign * curl);
