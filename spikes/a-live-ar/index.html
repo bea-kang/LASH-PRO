@@ -570,10 +570,57 @@ function affineFrom(src, dst) {
   const e = d2.x - a * s2.x - c * s2.y, f = d2.y - b * s2.x - d * s2.y;
   return [a, b, c, d, e, f];
 }
+// 레퍼런스 눈꺼풀 곡선 (inner→top→outer 2차 곡선), t 0~1
+function refLidAt(lid, t) {
+  const { inner, outer, top } = lid, m = 1 - t;
+  const cpt = sub(mul(top, 2), mul(add(inner, outer), 0.5));
+  return v2(m*m*inner.x + 2*m*t*cpt.x + t*t*outer.x, m*m*inner.y + 2*m*t*cpt.y + t*t*outer.y);
+}
+// 사용자 윗눈꺼풀 폴리라인 (눈앞→눈꼬리), 라인 바깥쪽으로 살짝 띄운 뿌리 라인
+function userLid(lm, i, W, H) {
+  const idx = i === 0 ? R_UPPER.slice().reverse() : L_UPPER; // 눈앞→눈꼬리
+  const pts = idx.map(j => v2(lm[j].x * W, lm[j].y * H));
+  const bot = i === 0 ? v2(lm[145].x * W, lm[145].y * H) : v2(lm[374].x * W, lm[374].y * H);
+  const inner = pts[0], outer = pts[pts.length - 1], axis = sub(outer, inner), w = len(axis) || 1;
+  let up = norm(v2(-axis.y, axis.x));
+  const mid = pts[Math.floor(pts.length / 2)];
+  if ((up.x * (mid.x - bot.x) + up.y * (mid.y - bot.y)) < 0) up = mul(up, -1);
+  return { pts, w, up, at: t => alongPolyline(pts, t).p };
+}
+const STRIPS = 12;
+function drawPixelEye(c, eye, lm, i, W, H, k) {
+  const U = userLid(lm, i, W, H), R = eye.lid, rw = eye.w;
+  const rootOff = 0.02; // 사용자 라인 바깥으로 2% 띄움
+  for (let sIdx = 0; sIdx < STRIPS; sIdx++) {
+    const t0 = sIdx / STRIPS, t1 = (sIdx + 1) / STRIPS;
+    // src: 레퍼런스 곡선 위 두 점 + 위 방향. dst: 사용자 폴리라인 위 두 점 + 위 방향(깜빡임 k 반영)
+    const r0 = refLidAt(R, t0), r1 = refLidAt(R, t1);
+    const u0 = add(U.at(t0), mul(U.up, U.w * rootOff)), u1 = add(U.at(t1), mul(U.up, U.w * rootOff));
+    const src = [r0, r1, add(r0, mul(R.up, rw))];
+    const dst = [u0, u1, add(u0, mul(U.up, U.w * k))];
+    const M = affineFrom(src, dst); if (!M) continue;
+    // 스트립 클립: 레퍼런스 좌표에서 t0~t1 사이 사각형 (라인 아래 0.1w ~ 위 1.0w). 이웃과 살짝 겹쳐 이음새 감춤
+    const ov = 0.004;
+    const q0 = refLidAt(R, Math.max(0, t0 - ov)), q1 = refLidAt(R, Math.min(1, t1 + ov));
+    c.save(); c.transform(...M);
+    c.beginPath();
+    const lo = -0.12 * rw, hi = 1.0 * rw;
+    c.moveTo(q0.x + R.up.x * lo, q0.y + R.up.y * lo); c.lineTo(q1.x + R.up.x * lo, q1.y + R.up.y * lo);
+    c.lineTo(q1.x + R.up.x * hi, q1.y + R.up.y * hi); c.lineTo(q0.x + R.up.x * hi, q0.y + R.up.y * hi);
+    c.closePath(); c.clip();
+    c.drawImage(eye.sprite, eye.rx, eye.ry);
+    c.restore();
+  }
+}
 function drawLiveLayer(c, lm, W, H, smooth = true) {
   liveLayer.eyes.forEach((eye, i) => {
     const now = eyeAnchors(lm, EYES[i], W, H);
-    if (eye.pixel) eye.openAtCapture = Math.max(eye.openAtCapture === 0.3 ? 0 : eye.openAtCapture, now.openRatio); // 픽셀 이식은 첫 프레임들에서 최대 개방도 학습
+    if (eye.pixel) {
+      eye.openAtCapture = Math.max(eye.openAtCapture === 0.3 ? 0 : eye.openAtCapture, now.openRatio);
+      const k = Math.max(0.25, Math.min(1.15, now.openRatio / Math.max(0.05, eye.openAtCapture)));
+      drawPixelEye(c, eye, lm, i, W, H, k);
+      return;
+    }
     // 깜빡임: 개방도 비율만큼 세로로 눌림 (0.25~1.15로 제한)
     const k = Math.max(0.25, Math.min(1.15, now.openRatio / Math.max(0.05, eye.openAtCapture)));
     let dst = eyeAnchors(lm, EYES[i], W, H, k).pts;
@@ -653,14 +700,15 @@ function extractRefLashes() {
   sctx.putImageData(out, 0, 0);
   // 앵커: 눈앞, 눈꼬리, 중앙에서 눈 너비만큼 위 (레퍼런스 좌표, 스프라이트는 rx,ry 오프셋)
   const anchors = [inner, outer, add(mid, mul(up, w))];
-  return { sprite, rx, ry, anchors, w };
+  return { sprite, rx, ry, anchors, w, lid: { inner, outer, top, up }, mirrored: false };
 }
 // 반대쪽 눈용: 스프라이트 좌우 반전 + 앵커도 반전
 function mirrorSprite(L) {
   const m = document.createElement('canvas'); m.width = L.sprite.width; m.height = L.sprite.height;
   const c = m.getContext('2d'); c.translate(m.width, 0); c.scale(-1, 1); c.drawImage(L.sprite, 0, 0);
   const fx = p => v2(2 * L.rx + L.sprite.width - p.x, p.y);
-  return { sprite: m, rx: L.rx, ry: L.ry, anchors: L.anchors.map(fx), w: L.w };
+  return { sprite: m, rx: L.rx, ry: L.ry, anchors: L.anchors.map(fx), w: L.w,
+           lid: { inner: fx(L.lid.inner), outer: fx(L.lid.outer), top: fx(L.lid.top), up: v2(-L.lid.up.x, L.lid.up.y) }, mirrored: true };
 }
 $('#btnPixel').addEventListener('click', () => {
   if (pick.pts.length < 3 || !lastLm) { $('#pickStatus').textContent = '카메라를 먼저 켜고 얼굴이 잡힌 상태에서 눌러요.'; return; }
@@ -671,8 +719,8 @@ $('#btnPixel').addEventListener('click', () => {
   const forImgLeft = refIsImgLeft ? one : two, forImgRight = refIsImgLeft ? two : one;
   liveLayer = {
     eyes: [
-      { sprite: forImgLeft.sprite, rx: forImgLeft.rx, ry: forImgLeft.ry, src: forImgLeft.anchors, openAtCapture: 0.3, smooth: null, pixel: true },
-      { sprite: forImgRight.sprite, rx: forImgRight.rx, ry: forImgRight.ry, src: forImgRight.anchors, openAtCapture: 0.3, smooth: null, pixel: true },
+      { sprite: forImgLeft.sprite, rx: forImgLeft.rx, ry: forImgLeft.ry, src: forImgLeft.anchors, lid: forImgLeft.lid, w: forImgLeft.w, openAtCapture: 0.3, smooth: null, pixel: true },
+      { sprite: forImgRight.sprite, rx: forImgRight.rx, ry: forImgRight.ry, src: forImgRight.anchors, lid: forImgRight.lid, w: forImgRight.w, openAtCapture: 0.3, smooth: null, pixel: true },
     ],
     show: true, run_id: 'pixel-' + Date.now(), before: null, after: null, pixel: true,
   };
