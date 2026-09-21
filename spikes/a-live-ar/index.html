@@ -595,14 +595,20 @@ function userLid(lm, i, W, H) {
   let up = norm(v2(-axis.y, axis.x));
   const mid = pts[Math.floor(pts.length / 2)];
   if ((up.x * (mid.x - bot.x) + up.y * (mid.y - bot.y)) < 0) up = mul(up, -1);
-  return { pts, w, up, at: t => alongPolyline(pts, t).p };
+  const at = t => {
+    if (t < 0) { const d = norm(sub(pts[0], pts[1])); return add(pts[0], mul(d, -t * w)); }
+    if (t > 1) { const d = norm(sub(pts[pts.length - 1], pts[pts.length - 2])); return add(pts[pts.length - 1], mul(d, (t - 1) * w)); }
+    return alongPolyline(pts, t).p;
+  };
+  return { pts, w, up, at };
 }
-const STRIPS = 12;
+// 조각 경계: 눈 안쪽은 촘촘히(12), 바깥으로 뻗는 부분은 넓게
+const STRIP_EDGES = [-0.35, -0.18, 0, ...Array.from({ length: 12 }, (_, j) => (j + 1) / 12), 1.2, 1.45];
 function drawPixelEye(c, eye, lm, i, W, H, k) {
   const U = userLid(lm, i, W, H), R = eye.lid, rw = eye.w;
   const rootOff = 0.02; // 사용자 라인 바깥으로 2% 띄움
-  for (let sIdx = 0; sIdx < STRIPS; sIdx++) {
-    const t0 = sIdx / STRIPS, t1 = (sIdx + 1) / STRIPS;
+  for (let sIdx = 0; sIdx < STRIP_EDGES.length - 1; sIdx++) {
+    const t0 = STRIP_EDGES[sIdx], t1 = STRIP_EDGES[sIdx + 1];
     // src: 레퍼런스 곡선 위 두 점 + 위 방향. dst: 사용자 폴리라인 위 두 점 + 위 방향(깜빡임 k 반영)
     const r0 = refLidAt(R, t0), r1 = refLidAt(R, t1);
     const u0 = add(U.at(t0), mul(U.up, U.w * rootOff)), u1 = add(U.at(t1), mul(U.up, U.w * rootOff));
@@ -611,7 +617,7 @@ function drawPixelEye(c, eye, lm, i, W, H, k) {
     const M = affineFrom(src, dst); if (!M) continue;
     // 스트립 클립: 레퍼런스 좌표에서 t0~t1 사이 사각형 (라인 아래 0.1w ~ 위 1.0w). 이웃과 살짝 겹쳐 이음새 감춤
     const ov = 0.004;
-    const q0 = refLidAt(R, Math.max(0, t0 - ov)), q1 = refLidAt(R, Math.min(1, t1 + ov));
+    const q0 = refLidAt(R, t0 - ov), q1 = refLidAt(R, t1 + ov);
     c.save(); c.transform(...M);
     c.beginPath();
     const lo = -0.12 * rw, hi = 1.0 * rw;
@@ -678,8 +684,8 @@ function extractRefLashes() {
   // 눈꺼풀 라인 근사: inner → top → outer 를 지나는 2차 곡선 (t: 0~1)
   const lidAt = t => { const m = 1 - t; const c = sub(mul(top, 2), mul(add(inner, outer), 0.5)); // 제어점: top이 곡선 위에 오도록
     return v2(m*m*inner.x + 2*m*t*c.x + t*t*outer.x, m*m*inner.y + 2*m*t*c.y + t*t*outer.y); };
-  const rx = Math.max(0, Math.floor(Math.min(inner.x, outer.x, top.x) - w * 0.3));
-  const rx2 = Math.min(refImg.width, Math.ceil(Math.max(inner.x, outer.x, top.x) + w * 0.3));
+  const rx = Math.max(0, Math.floor(Math.min(inner.x, outer.x, top.x) - w * 0.5));
+  const rx2 = Math.min(refImg.width, Math.ceil(Math.max(inner.x, outer.x, top.x) + w * 0.5));
   const ry = Math.max(0, Math.floor(Math.min(inner.y, outer.y, top.y) - w * 0.9));
   const ry2 = Math.min(refImg.height, Math.ceil(Math.max(inner.y, outer.y, top.y) + w * 0.5));
   const rw = rx2 - rx, rh = ry2 - ry;
@@ -692,11 +698,11 @@ function extractRefLashes() {
   // 배경 밝기: 띠 안 픽셀의 상위 30% 밝기 (눈꺼풀 피부)
   const inBand = [];
   const bandOf = (px, py) => { // 라인 기준 수직 거리(위 음수) 와 축 방향 위치 t
-    const p = v2(px, py), rel = sub(p, inner), t = Math.max(0, Math.min(1, (rel.x * axis.x + rel.y * axis.y) / (w * w)));
-    const L = lidAt(t); const dv = (p.x - L.x) * up.x + (p.y - L.y) * up.y; // 양수 = 라인 위(속눈썹 쪽)
+    const p = v2(px, py), rel = sub(p, inner), t = (rel.x * axis.x + rel.y * axis.y) / (w * w); // 눈 바깥은 <0, >1
+    const L = lidAt(Math.max(-0.4, Math.min(1.5, t))); const dv = (p.x - L.x) * up.x + (p.y - L.y) * up.y; // 양수 = 라인 위(속눈썹 쪽)
     return { dv, t };
   };
-  for (let i = 0; i < n; i++) { const { dv, t } = bandOf(rx + i % rw, ry + Math.floor(i / rw)); if (dv > -w * 0.05 && dv < w * 0.8 && t > -0.05 && t < 1.05) inBand.push(lum[i]); }
+  for (let i = 0; i < n; i++) { const { dv, t } = bandOf(rx + i % rw, ry + Math.floor(i / rw)); if (dv > -w * 0.05 && dv < w * 0.8 && t > -0.35 && t < 1.45) inBand.push(lum[i]); }
   inBand.sort((a, b) => a - b); const bg = inBand[Math.floor(inBand.length * 0.7)] || 200;
   const sprite = document.createElement('canvas'); sprite.width = rw; sprite.height = rh;
   const sctx = sprite.getContext('2d'); const out = sctx.createImageData(rw, rh); const o = out.data;
@@ -704,9 +710,9 @@ function extractRefLashes() {
     const px = rx + i % rw, py = ry + Math.floor(i / rw);
     const { dv, t } = bandOf(px, py);
     let band = 0;
-    if (dv >= -w * 0.06 && dv <= w * 0.85 && t >= -0.03 && t <= 1.03) band = dv > w * 0.65 ? (w * 0.85 - dv) / (w * 0.2) : 1;
+    if (dv >= -w * 0.06 && dv <= w * 0.9 && t >= -0.35 && t <= 1.45) band = dv > w * 0.7 ? (w * 0.9 - dv) / (w * 0.2) : 1;
     const dark = bg - lum[i];                         // 배경보다 얼마나 어두운가
-    const alpha = Math.max(0, Math.min(1, (dark - 28) / 70)) * band;
+    const alpha = Math.max(0, Math.min(1, (dark - 18) / 55)) * band;
     o[i*4] = d[i*4]; o[i*4+1] = d[i*4+1]; o[i*4+2] = d[i*4+2]; o[i*4+3] = Math.round(alpha * 255);
   }
   sctx.putImageData(out, 0, 0);
