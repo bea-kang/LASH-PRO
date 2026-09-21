@@ -71,6 +71,10 @@
 
     <div class="ref">
       <label>3. 정밀 합성 — 레퍼런스 사진을 그대로 내 눈에 (방식 B)</label>
+      <div class="seg" id="engine">
+        <button data-v="openai" class="on">GPT (gpt-image-1)</button>
+        <button data-v="gemini">Gemini (flash-image)</button>
+      </div>
       <div class="row">
         <button class="primary" id="btnTryon" disabled>지금 화면으로 합성</button>
         <button id="btnBack" style="display:none">라이브로 돌아가기</button>
@@ -155,7 +159,7 @@ const VOLUME = { natural: [40, 1], volume: [42, 2], mega: [44, 3] };
 const state = {
   zones: [...PRESETS.natural], curl: 'C', volume: 'natural',
   opacity: 0.85, show: true, mirror: true, mode: null, // 'video' | 'image'
-  texture: 'even', zoom: true,
+  texture: 'even', zoom: true, engine: 'openai',
 };
 // 눈 확대 보기: 프레임 간 부드럽게 따라가는 뷰 상태
 const view = { cx: 0, cy: 0, z: 1, init: false };
@@ -186,6 +190,7 @@ seg('#style', v => { state.zones = [...PRESETS[v]]; renderZones(); strands = nul
 seg('#curl', v => { state.curl = v; });
 seg('#volume', v => { state.volume = v; strands = null; });
 seg('#texture', v => { state.texture = v; strands = null; });
+seg('#engine', v => { state.engine = v; });
 $('#opacity').addEventListener('input', e => { state.opacity = +e.target.value; $('#opOut').textContent = e.target.value; });
 $('#btnToggle').addEventListener('click', e => { state.show = !state.show; e.target.textContent = state.show ? '속눈썹 끄기' : '속눈썹 켜기'; });
 $('#btnMirror').addEventListener('click', () => { state.mirror = !state.mirror; });
@@ -472,7 +477,7 @@ $('#btnTryon').addEventListener('click', async () => {
   $('#btnTryon').disabled = true; st.className = 'hint'; st.textContent = '합성 중… (5~20초)';
   const t0 = performance.now();
   try {
-    const r = await fetch('/api/tryon', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frame: frameUrl, reference: refDataUrl }) });
+    const r = await fetch('/api/tryon', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frame: frameUrl, reference: refDataUrl, engine: state.engine }) });
     const m = await r.json();
     if (!r.ok) throw new Error(m.error || r.status);
     const img = new Image(); img.src = m.image; await img.decode();
@@ -489,7 +494,7 @@ $('#btnTryon').addEventListener('click', async () => {
     actx.drawImage(feather, x0, y0);
     result = { before, after };
     $('#cmpWrap').style.display = ''; $('#btnBack').style.display = '';
-    st.className = 'hint ok'; st.textContent = `완료 · ${((performance.now() - t0) / 1000).toFixed(1)}초 · 슬라이더로 전후 비교`;
+    st.className = 'hint ok'; st.textContent = `완료 (${state.engine}) · ${((performance.now() - t0) / 1000).toFixed(1)}초 · 슬라이더로 전후 비교`;
     drawResult();
   } catch (err) {
     st.className = 'hint err'; st.textContent = '실패: ' + err.message;

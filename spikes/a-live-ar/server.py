@@ -13,10 +13,12 @@ import urllib.error
 import urllib.request
 
 import anthropic
+import requests
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL = "claude-opus-5"
 GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
+OPENAI_IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
 
 
 def load_dotenv():
@@ -145,6 +147,39 @@ def gemini_tryon(frame_b64: str, frame_mime: str, ref_b64: str, ref_mime: str) -
     raise RuntimeError("이미지가 안 돌아왔어요: " + (" ".join(texts)[:300] or json.dumps(resp)[:300]))
 
 
+def openai_tryon(frame_b64: str, frame_mime: str, ref_b64: str, ref_mime: str) -> tuple[str, str]:
+    """OpenAI Images edit: image[] 여러 장 + prompt. input_fidelity=high 로 얼굴 보존."""
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY가 없어요. spikes/a-live-ar/.env 에 OPENAI_API_KEY=sk-... 를 넣고 서버를 다시 띄우세요.")
+    ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+    files = [
+        ("image[]", ("frame." + ext.get(frame_mime, "png"), base64.b64decode(frame_b64), frame_mime)),
+        ("image[]", ("reference." + ext.get(ref_mime, "png"), base64.b64decode(ref_b64), ref_mime)),
+    ]
+    data = {
+        "model": OPENAI_IMAGE_MODEL,
+        "prompt": TRYON_PROMPT + "\n(The first image is image 1, the second image is image 2.)",
+        "size": "1536x1024",
+        "quality": "high",
+        "input_fidelity": "high",
+        "n": "1",
+    }
+    r = requests.post("https://api.openai.com/v1/images/edits", headers={"Authorization": f"Bearer {key}"}, files=files, data=data, timeout=180)
+    if r.status_code != 200:
+        raise RuntimeError(f"OpenAI {r.status_code}: {r.text[:600]}")
+    out = r.json()["data"][0]
+    if out.get("b64_json"):
+        return "image/png", out["b64_json"]
+    if out.get("url"):
+        img = requests.get(out["url"], timeout=60).content
+        return "image/png", base64.b64encode(img).decode()
+    raise RuntimeError("이미지가 안 돌아왔어요: " + json.dumps(out)[:300])
+
+
+ENGINES = {"gemini": gemini_tryon, "openai": openai_tryon}
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=HERE, **kw)
@@ -196,8 +231,11 @@ class Handler(SimpleHTTPRequestHandler):
             req = json.loads(self.rfile.read(n))
             fm, fb = split_data_url(req["frame"])
             rm, rb = split_data_url(req["reference"])
-            mime, b64 = gemini_tryon(fb, fm, rb, rm)
-            sys.stderr.write("tryon: ok %s %d bytes\n" % (mime, len(b64)))
+            engine = req.get("engine", "gemini")
+            if engine not in ENGINES:
+                return self._json(400, {"error": f"unknown engine {engine}"})
+            mime, b64 = ENGINES[engine](fb, fm, rb, rm)
+            sys.stderr.write("tryon[%s]: ok %s %d bytes\n" % (engine, mime, len(b64)))
             return self._json(200, {"image": f"data:{mime};base64,{b64}"})
         except Exception as e:  # noqa: BLE001
             sys.stderr.write("tryon: ERR %s\n" % e)
@@ -206,5 +244,5 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8787
-    print(f"spike A/B on http://localhost:{port}  (anthropic key: {'yes' if os.environ.get('ANTHROPIC_API_KEY') else 'NO'}, gemini key: {'yes' if os.environ.get('GEMINI_API_KEY') else 'NO'}, image model: {GEMINI_IMAGE_MODEL})", flush=True)
+    print(f"spike A/B on http://localhost:{port}  (anthropic key: {'yes' if os.environ.get('ANTHROPIC_API_KEY') else 'NO'}, gemini: {'yes' if os.environ.get('GEMINI_API_KEY') else 'NO'} [{GEMINI_IMAGE_MODEL}], openai: {'yes' if os.environ.get('OPENAI_API_KEY') else 'NO'} [{OPENAI_IMAGE_MODEL}])", flush=True)
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
