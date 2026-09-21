@@ -66,7 +66,7 @@
         <input type="file" id="refFile" accept="image/*" hidden>
         <img id="refThumb" alt="" style="display:none;height:44px;border-radius:6px;object-fit:cover">
       </div>
-      <div class="hint" id="refStatus">인스타 스크린샷을 올리면 컬·구간 길이·볼륨·스타일로 번역해서 내 눈에 바로 적용해요. 카메라 화면은 그대로예요.</div>
+      <div class="hint" id="refStatus">인스타 스크린샷을 올리면 컬·구간 길이·볼륨·스타일·질감으로 번역해서 내 눈에 바로 적용해요. 카메라 화면은 그대로예요.</div>
     </div>
 
     <div>
@@ -90,6 +90,13 @@
       <div class="zones" id="zones"></div>
     </div>
     <div>
+      <label>질감</label>
+      <div class="seg" id="texture">
+        <button data-v="even" class="on">고르게</button>
+        <button data-v="wispy">위스피(스파이크)</button>
+      </div>
+    </div>
+    <div>
       <label>볼륨</label>
       <div class="seg" id="volume">
         <button data-v="natural" class="on">내추럴</button>
@@ -103,6 +110,7 @@
     </div>
     <div class="row">
       <button id="btnToggle">속눈썹 끄기</button>
+      <button id="btnZoom">확대 끄기</button>
       <button id="btnMirror">거울 반전</button>
       <button id="btnSnap">캡처 저장</button>
     </div>
@@ -134,7 +142,10 @@ const VOLUME = { natural: [40, 1], volume: [42, 2], mega: [44, 3] };
 const state = {
   zones: [...PRESETS.natural], curl: 'C', volume: 'natural',
   opacity: 0.85, show: true, mirror: true, mode: null, // 'video' | 'image'
+  texture: 'even', zoom: true,
 };
+// 눈 확대 보기: 프레임 간 부드럽게 따라가는 뷰 상태
+const view = { cx: 0, cy: 0, z: 1, init: false };
 
 // ---- UI ----
 const $ = s => document.querySelector(s);
@@ -161,9 +172,11 @@ function seg(id, onPick) {
 seg('#style', v => { state.zones = [...PRESETS[v]]; renderZones(); strands = null; });
 seg('#curl', v => { state.curl = v; });
 seg('#volume', v => { state.volume = v; strands = null; });
+seg('#texture', v => { state.texture = v; strands = null; });
 $('#opacity').addEventListener('input', e => { state.opacity = +e.target.value; $('#opOut').textContent = e.target.value; });
 $('#btnToggle').addEventListener('click', e => { state.show = !state.show; e.target.textContent = state.show ? '속눈썹 끄기' : '속눈썹 켜기'; });
 $('#btnMirror').addEventListener('click', () => { state.mirror = !state.mirror; });
+$('#btnZoom').addEventListener('click', e => { state.zoom = !state.zoom; e.target.textContent = state.zoom ? '확대 끄기' : '눈 확대'; view.init = false; });
 $('#btnSnap').addEventListener('click', () => {
   const a = document.createElement('a'); a.download = 'lash-live.png'; a.href = canvas.toDataURL('image/png'); a.click();
 });
@@ -171,8 +184,8 @@ $('#btnSnap').addEventListener('click', () => {
 // 서버 번역 결과 → 상태/UI 반영
 function setSeg(id, v) { [...$(id).children].forEach(x => x.classList.toggle('on', x.dataset.v === v)); }
 function applyLashMap(m) {
-  state.curl = m.curl; state.zones = [...m.zone_lengths_mm]; state.volume = m.volume;
-  setSeg('#curl', m.curl); setSeg('#volume', m.volume); setSeg('#style', m.style);
+  state.curl = m.curl; state.zones = [...m.zone_lengths_mm]; state.volume = m.volume; state.texture = m.texture || 'even';
+  setSeg('#curl', m.curl); setSeg('#volume', m.volume); setSeg('#style', m.style); setSeg('#texture', state.texture);
   renderZones(); strands = null;
 }
 $('#refFile').addEventListener('change', async e => {
@@ -288,19 +301,31 @@ function zoneLength(t) { // t: 0 눈앞 → 1 눈꼬리, 5구간을 부드럽게
 // 가닥 배치는 눈당 한 번만 뽑고(seed), 프레임마다 위치만 다시 계산
 function makeStrands() {
   const [n, perRoot] = VOLUME[state.volume];
+  const wispy = state.texture === 'wispy';
   const mk = () => {
     const out = [];
+    // 위스피: 5~6뿌리마다 스파이크 중심. 근처 가닥은 길고 중심으로 모이고, 사이는 짧게
+    const spikeEvery = 5 + Math.floor(Math.random() * 2);
+    const spikes = [];
+    if (wispy) for (let i = 2 + Math.floor(Math.random() * 3); i < n; i += spikeEvery) spikes.push((i + 0.5) / n);
     for (let i = 0; i < n; i++) {
       const t = (i + 0.5) / n + (Math.random() - 0.5) * 0.6 / n;
       // 눈앞 끝 5%는 아주 짧고 성글게 (실제 시술에서 안쪽은 비움)
       if (t < 0.05 || t > 0.99) continue;
+      let lenMul = 1, conv = 0;
+      if (wispy) {
+        const sp = spikes.reduce((a, b) => Math.abs(b - t) < Math.abs(a - t) ? b : a, spikes[0] ?? t);
+        const d = (sp - t) * n; // 뿌리 간격 단위 거리
+        if (Math.abs(d) <= 1.2) { lenMul = 1.28; conv = d * 0.22; }   // 스파이크: 길고 중심으로 수렴
+        else lenMul = 0.78;                                            // 베이스: 짧게
+      }
       for (let k = 0; k < perRoot; k++) {
         out.push({
           t,
-          lenJit: (0.9 + Math.random() * 0.2) * (t < 0.12 ? 0.7 : 1),
-          fan: (k - (perRoot - 1) / 2) * 0.16 + (Math.random() - 0.5) * 0.12,
+          lenJit: (0.9 + Math.random() * 0.2) * (t < 0.12 ? 0.7 : 1) * lenMul,
+          fan: (k - (perRoot - 1) / 2) * 0.16 * (conv ? 0.3 : 1) + (Math.random() - 0.5) * 0.12 + conv,
           curlJit: 0.85 + Math.random() * 0.3,
-          w: 0.75 + Math.random() * 0.4,
+          w: (0.75 + Math.random() * 0.4) * (lenMul > 1 ? 1.15 : 1),
         });
       }
     }
@@ -368,7 +393,22 @@ function bez(p0, p1, p2, p3, t) {
 function drawFrame(src, W, H, lm) {
   if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
   ctx.save();
+  ctx.clearRect(0, 0, W, H);
   if (state.mirror) { ctx.translate(W, 0); ctx.scale(-1, 1); }
+  // 눈 확대: 양쪽 눈 바운딩 박스 기준으로 확대. 목표값을 프레임마다 lerp 해서 떨림 줄임
+  if (state.zoom && lm) {
+    const xs = [33, 133, 362, 263, 159, 145, 386, 374].map(i => lm[i].x * W);
+    const ys = [33, 133, 362, 263, 159, 145, 386, 374].map(i => lm[i].y * H);
+    const bw = Math.max(...xs) - Math.min(...xs), bh = Math.max(...ys) - Math.min(...ys);
+    const tcx = (Math.max(...xs) + Math.min(...xs)) / 2, tcy = (Math.max(...ys) + Math.min(...ys)) / 2;
+    const tz = Math.max(1, Math.min(4, Math.min(W / (bw * 1.35), H / (bh * 4))));
+    if (!view.init) { view.cx = tcx; view.cy = tcy; view.z = tz; view.init = true; }
+    const a = 0.15; view.cx += (tcx - view.cx) * a; view.cy += (tcy - view.cy) * a; view.z += (tz - view.z) * a;
+    ctx.translate(W / 2, H / 2); ctx.scale(view.z, view.z); ctx.translate(-view.cx, -view.cy);
+  } else if (state.zoom && view.init) {
+    // 얼굴을 잠깐 놓쳐도 마지막 뷰 유지
+    ctx.translate(W / 2, H / 2); ctx.scale(view.z, view.z); ctx.translate(-view.cx, -view.cy);
+  }
   ctx.drawImage(src, 0, 0, W, H);
   if (lm && state.show) {
     if (!strands) strands = makeStrands();
@@ -379,7 +419,8 @@ function drawFrame(src, W, H, lm) {
     const r = drawEye(lm, R_UPPER, R_LOWER, 'R', W, H, faceUp);
     const l = drawEye(lm, L_UPPER, L_LOWER, 'L', W, H, faceUp);
     ctx.shadowBlur = 0;
-    stats.textContent = `${fps ? fps + ' fps · ' : ''}눈 너비 ${Math.round(r.width)}/${Math.round(l.width)}px · 개방도 ${r.openness.toFixed(2)}/${l.openness.toFixed(2)} · ${state.curl}컬 ${state.zones.join('-')}mm ${state.volume}`;
+    const small = Math.min(r.width, l.width) < 70;
+    stats.textContent = `${fps ? fps + ' fps · ' : ''}눈 너비 ${Math.round(r.width)}/${Math.round(l.width)}px${small ? ' · 카메라에 더 가까이 오면 선명해져요' : ''} · ${state.curl}컬 ${state.zones.join('-')}mm ${state.volume} ${state.texture}`;
   } else if (state.mode) {
     stats.textContent = lm ? '속눈썹 꺼짐' : '얼굴을 못 찾았어요';
   }
