@@ -119,6 +119,7 @@ class Handler(SimpleHTTPRequestHandler):
             if media_type not in ("image/jpeg", "image/png", "image/webp", "image/gif"):
                 return self._json(400, {"error": f"unsupported media type {media_type}"})
             result = translate(b64, media_type)
+            sys.stderr.write("lashmap: %s\n" % json.dumps(result, ensure_ascii=False))
             return self._json(200, result)
         except anthropic.AuthenticationError:
             return self._json(401, {"error": "API 키가 잘못됐어요."})
