@@ -482,12 +482,18 @@ const EYES = [
   { inner: 133, outer: 33, top: 159, bot: 145 },   // 이미지 왼쪽 눈
   { inner: 362, outer: 263, top: 386, bot: 374 },  // 이미지 오른쪽 눈
 ];
-function eyeAnchors(lm, e, W, H) {
+// 앵커 3점: 눈앞, 눈꼬리, 그리고 눈 중앙에서 눈 너비만큼 위(수직). 세 번째 점은 항상 눈 너비 크기라 삼각형이 찌그러지지 않음.
+// 깜빡임은 세로 비율(k)로만 반영: 지금 개방도 / 캡처 때 개방도
+function eyeAnchors(lm, e, W, H, k = 1) {
   const P = i => v2(lm[i].x * W, lm[i].y * H);
   const inner = P(e.inner), outer = P(e.outer), top = P(e.top), bot = P(e.bot);
-  // 세 번째 앵커: 윗눈꺼풀에서 (윗-아랫) 만큼 더 위. 눈이 감기면 이 점이 내려와 레이어가 세로로 눌림
-  const up = add(top, sub(top, bot));
-  return [inner, outer, up];
+  const axis = sub(outer, inner), w = len(axis) || 1;
+  let perp = v2(-axis.y, axis.x);                     // 축에 수직
+  if ((perp.x * (top.x - bot.x) + perp.y * (top.y - bot.y)) < 0) perp = mul(perp, -1); // 윗눈꺼풀 쪽으로
+  const mid = mul(add(inner, outer), 0.5);
+  const up = add(mid, mul(perp, k));                  // |perp| = w
+  const openRatio = len(sub(top, bot)) / w;
+  return { pts: [inner, outer, up], openRatio };
 }
 function buildLiveLayer(before, after, lm, W, H) {
   const bctx = before.getContext('2d'), actx = after.getContext('2d');
@@ -518,7 +524,8 @@ function buildLiveLayer(before, after, lm, W, H) {
       o[i*4] = a[i*4]; o[i*4+1] = a[i*4+1]; o[i*4+2] = a[i*4+2]; o[i*4+3] = Math.round(alpha * 255);
     }
     sctx.putImageData(out, 0, 0);
-    return { sprite, rx, ry, src: eyeAnchors(lm, e, W, H) };
+    const anc = eyeAnchors(lm, e, W, H);
+    return { sprite, rx, ry, src: anc.pts, openAtCapture: Math.max(0.05, anc.openRatio), smooth: null };
   });
   return { eyes };
 }
@@ -534,9 +541,18 @@ function affineFrom(src, dst) {
   const e = d2.x - a * s2.x - c * s2.y, f = d2.y - b * s2.x - d * s2.y;
   return [a, b, c, d, e, f];
 }
-function drawLiveLayer(c, lm, W, H) {
+function drawLiveLayer(c, lm, W, H, smooth = true) {
   liveLayer.eyes.forEach((eye, i) => {
-    const M = affineFrom(eye.src, eyeAnchors(lm, EYES[i], W, H)); if (!M) return;
+    const now = eyeAnchors(lm, EYES[i], W, H);
+    // 깜빡임: 개방도 비율만큼 세로로 눌림 (0.25~1.15로 제한)
+    const k = Math.max(0.25, Math.min(1.15, now.openRatio / eye.openAtCapture));
+    let dst = eyeAnchors(lm, EYES[i], W, H, k).pts;
+    if (smooth) { // 프레임 간 lerp로 떨림 완화
+      if (!eye.smooth) eye.smooth = dst.map(p => ({ ...p }));
+      else eye.smooth = eye.smooth.map((p, j) => add(p, mul(sub(dst[j], p), 0.45)));
+      dst = eye.smooth;
+    }
+    const M = affineFrom(eye.src, dst); if (!M) return;
     c.save(); c.transform(...M); c.drawImage(eye.sprite, eye.rx, eye.ry); c.restore();
   });
 }
@@ -580,7 +596,7 @@ $('#btnTryon').addEventListener('click', async () => {
     // 정지 비교용 '후' = 전 + 레이어 (사각형 자국 없음)
     const after = document.createElement('canvas'); after.width = W; after.height = H;
     const actx = after.getContext('2d'); actx.drawImage(before, 0, 0);
-    drawLiveLayer(actx, lm, W, H);
+    drawLiveLayer(actx, lm, W, H, false);
     liveLayer.before = before; liveLayer.after = after;
     result = null;
     fb.me = null; fb.ref = null; setSeg('#fbMe', ''); setSeg('#fbRef', ''); $('#fbNote').value = ''; $('#fbStatus').textContent = '';
