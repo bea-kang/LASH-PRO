@@ -9,10 +9,14 @@ import os
 import sys
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
+import urllib.error
+import urllib.request
+
 import anthropic
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL = "claude-opus-5"
+GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
 
 
 def load_dotenv():
@@ -92,6 +96,55 @@ def translate(image_b64: str, media_type: str) -> dict:
     return data
 
 
+TRYON_PROMPT = """Image 1 is a close-up photo of a person's eyes. Image 2 is a reference photo of eyelash extensions done at a lash salon.
+Edit image 1 so the person is wearing eyelash extensions that reproduce image 2 as faithfully as possible: the same curl, the same lengths per zone (inner corner to outer corner), the same density, the same spiky/wispy or even pattern, the same lash color.
+Keep everything else in image 1 exactly as it is: eye shape and size, eyelids, skin texture, iris, eyebrows, lighting, framing, resolution. Do not enlarge the eyes, do not retouch the skin, do not add eyeliner or other makeup, do not change the face.
+Return only the edited version of image 1, same size and framing."""
+
+
+def split_data_url(data_url: str):
+    header, b64 = data_url.split(",", 1)
+    return header[5:].split(";")[0], b64
+
+
+def gemini_tryon(frame_b64: str, frame_mime: str, ref_b64: str, ref_mime: str) -> tuple[str, str]:
+    """Returns (mime_type, base64) of the edited image."""
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        raise RuntimeError("GEMINI_API_KEY가 없어요. spikes/a-live-ar/.env 에 GEMINI_API_KEY=... 를 넣고 서버를 다시 띄우세요. (Google AI Studio에서 발급)")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_IMAGE_MODEL}:generateContent"
+    body = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": TRYON_PROMPT},
+                {"inlineData": {"mimeType": frame_mime, "data": frame_b64}},
+                {"inlineData": {"mimeType": ref_mime, "data": ref_b64}},
+            ],
+        }],
+        "generationConfig": {"responseModalities": ["IMAGE"]},
+    }
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode(), method="POST",
+        headers={"Content-Type": "application/json", "x-goog-api-key": key},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            resp = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")[:600]
+        raise RuntimeError(f"Gemini {e.code}: {detail}") from None
+    # 응답에서 첫 이미지 파트 찾기 (inlineData / inline_data 둘 다 대응)
+    for cand in resp.get("candidates", []):
+        for part in cand.get("content", {}).get("parts", []):
+            blob = part.get("inlineData") or part.get("inline_data")
+            if blob and blob.get("data"):
+                return blob.get("mimeType") or blob.get("mime_type") or "image/png", blob["data"]
+    # 이미지가 없으면 텍스트라도 돌려줌 (거절 사유 등)
+    texts = [p.get("text") for c in resp.get("candidates", []) for p in c.get("content", {}).get("parts", []) if p.get("text")]
+    raise RuntimeError("이미지가 안 돌아왔어요: " + (" ".join(texts)[:300] or json.dumps(resp)[:300]))
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=HERE, **kw)
@@ -108,6 +161,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_POST(self):
+        if self.path == "/api/tryon":
+            return self.do_tryon()
         if self.path != "/api/lashmap":
             return self._json(404, {"error": "not found"})
         if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -135,7 +190,21 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(500, {"error": str(e)})
 
 
+    def do_tryon(self):
+        n = int(self.headers.get("Content-Length", 0))
+        try:
+            req = json.loads(self.rfile.read(n))
+            fm, fb = split_data_url(req["frame"])
+            rm, rb = split_data_url(req["reference"])
+            mime, b64 = gemini_tryon(fb, fm, rb, rm)
+            sys.stderr.write("tryon: ok %s %d bytes\n" % (mime, len(b64)))
+            return self._json(200, {"image": f"data:{mime};base64,{b64}"})
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write("tryon: ERR %s\n" % e)
+            return self._json(500, {"error": str(e)})
+
+
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8787
-    print(f"spike A on http://localhost:{port}  (key: {'yes' if os.environ.get('ANTHROPIC_API_KEY') else 'NO'})", flush=True)
+    print(f"spike A/B on http://localhost:{port}  (anthropic key: {'yes' if os.environ.get('ANTHROPIC_API_KEY') else 'NO'}, gemini key: {'yes' if os.environ.get('GEMINI_API_KEY') else 'NO'}, image model: {GEMINI_IMAGE_MODEL})", flush=True)
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()

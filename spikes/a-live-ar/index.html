@@ -69,8 +69,21 @@
       <div class="hint" id="refStatus">인스타 스크린샷을 올리면 컬·구간 길이·볼륨·스타일·질감으로 번역해서 내 눈에 바로 적용해요. 카메라 화면은 그대로예요.</div>
     </div>
 
+    <div class="ref">
+      <label>3. 정밀 합성 — 레퍼런스 사진을 그대로 내 눈에 (방식 B)</label>
+      <div class="row">
+        <button class="primary" id="btnTryon" disabled>지금 화면으로 합성</button>
+        <button id="btnBack" style="display:none">라이브로 돌아가기</button>
+      </div>
+      <div class="hint" id="tryonStatus">카메라(또는 셀카)와 레퍼런스가 둘 다 있으면 눌러요. 눈을 뜬 상태에서 캡처 → 눈 주변만 잘라 이미지 편집 모델에 보내고 → 결과를 원래 자리에 붙여요. 5~20초.</div>
+      <div id="cmpWrap" style="display:none">
+        <label>전 ← → 후</label>
+        <input type="range" id="cmp" min="0" max="100" value="50">
+      </div>
+    </div>
+
     <div>
-      <label>스타일 프리셋</label>
+      <label>스타일 프리셋 (방식 A · 파라미터)</label>
       <div class="seg" id="style">
         <button data-v="natural" class="on">내추럴</button>
         <button data-v="cat">캣아이</button>
@@ -194,6 +207,7 @@ $('#refFile').addEventListener('change', async e => {
   const thumb = $('#refThumb'); thumb.src = URL.createObjectURL(f); thumb.style.display = '';
   // 긴 변 1024px로 줄여서 전송 (비용·속도)
   const dataUrl = await downscale(f, 1024);
+  refDataUrl = dataUrl; updateTryonBtn();
   try {
     const r = await fetch('/api/lashmap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: dataUrl }) });
     const m = await r.json();
@@ -220,6 +234,10 @@ function downscale(file, max) {
 const video = $('#video'), photo = $('#photo'), canvas = $('#canvas'), ctx = canvas.getContext('2d');
 const msg = $('#msg'), stats = $('#stats');
 let landmarker, strands = null, lastVideoTime = -1, frames = 0, tPrev = performance.now(), fps = 0;
+let lastLm = null, lastSrc = null, lastW = 0, lastH = 0;   // 캡처용 최근 프레임
+let refDataUrl = null;                                     // 레퍼런스 원본(축소본)
+let result = null;                                         // {before: canvas, after: canvas}
+function updateTryonBtn() { $('#btnTryon').disabled = !(refDataUrl && lastLm && state.mode); }
 
 try {
   const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
@@ -255,7 +273,7 @@ $('#file').addEventListener('change', async e => {
   const res = landmarker.detect(photo);
   drawFrame(photo, photo.naturalWidth, photo.naturalHeight, res.faceLandmarks?.[0]);
   // 슬라이더 조작 시 다시 그리도록 루프
-  const redraw = () => { if (state.mode !== 'image') return; drawFrame(photo, photo.naturalWidth, photo.naturalHeight, res.faceLandmarks?.[0]); requestAnimationFrame(redraw); };
+  const redraw = () => { if (state.mode !== 'image' || result) return; drawFrame(photo, photo.naturalWidth, photo.naturalHeight, res.faceLandmarks?.[0]); requestAnimationFrame(redraw); };
   requestAnimationFrame(redraw);
 });
 
@@ -391,6 +409,8 @@ function bez(p0, p1, p2, p3, t) {
 }
 
 function drawFrame(src, W, H, lm) {
+  if (result) return; // 결과 화면 표시 중엔 라이브 갱신 안 함
+  lastSrc = src; lastW = W; lastH = H; if (lm) { lastLm = lm; updateTryonBtn(); }
   if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
   ctx.save();
   ctx.clearRect(0, 0, W, H);
@@ -425,6 +445,82 @@ function drawFrame(src, W, H, lm) {
     stats.textContent = lm ? '속눈썹 꺼짐' : '얼굴을 못 찾았어요';
   }
   ctx.restore();
+}
+
+// ---- 방식 B: 캡처 → 눈 크롭 → 이미지 편집 → 되붙이기 ----
+$('#btnTryon').addEventListener('click', async () => {
+  const st = $('#tryonStatus');
+  if (!lastLm || !lastSrc || !refDataUrl) return;
+  const W = lastW, H = lastH, lm = lastLm;
+  // 원본 프레임 스냅샷 (거울 반전 없이 원 좌표계)
+  const before = document.createElement('canvas'); before.width = W; before.height = H;
+  before.getContext('2d').drawImage(lastSrc, 0, 0, W, H);
+  // 양쪽 눈 바운딩 박스 + 여백 → 크롭 사각형 (눈썹까지 포함되게 위로 넉넉히)
+  const ids = [33, 133, 362, 263, 159, 145, 386, 374];
+  const xs = ids.map(i => lm[i].x * W), ys = ids.map(i => lm[i].y * H);
+  const bw = Math.max(...xs) - Math.min(...xs), bh = Math.max(...ys) - Math.min(...ys);
+  const cx = (Math.max(...xs) + Math.min(...xs)) / 2, cy = (Math.max(...ys) + Math.min(...ys)) / 2;
+  let cw = bw * 1.5, ch = Math.max(bh * 4, cw * 0.45);
+  let x0 = Math.max(0, Math.round(cx - cw / 2)), y0 = Math.max(0, Math.round(cy - ch * 0.55));
+  cw = Math.min(W - x0, Math.round(cw)); ch = Math.min(H - y0, Math.round(ch));
+  // 크롭을 최소 1024px 폭으로 업스케일해서 전송 (모델이 디테일을 볼 수 있게)
+  const up = Math.max(1, 1024 / cw);
+  const crop = document.createElement('canvas'); crop.width = Math.round(cw * up); crop.height = Math.round(ch * up);
+  crop.getContext('2d').drawImage(before, x0, y0, cw, ch, 0, 0, crop.width, crop.height);
+  const frameUrl = crop.toDataURL('image/jpeg', 0.92);
+
+  $('#btnTryon').disabled = true; st.className = 'hint'; st.textContent = '합성 중… (5~20초)';
+  const t0 = performance.now();
+  try {
+    const r = await fetch('/api/tryon', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ frame: frameUrl, reference: refDataUrl }) });
+    const m = await r.json();
+    if (!r.ok) throw new Error(m.error || r.status);
+    const img = new Image(); img.src = m.image; await img.decode();
+    // 결과를 원래 크롭 자리에 되붙이기 (가장자리 부드럽게)
+    const after = document.createElement('canvas'); after.width = W; after.height = H;
+    const actx = after.getContext('2d'); actx.drawImage(before, 0, 0);
+    const feather = document.createElement('canvas'); feather.width = cw; feather.height = ch;
+    const fctx = feather.getContext('2d');
+    fctx.drawImage(img, 0, 0, img.width, img.height, 0, 0, cw, ch);
+    // 가장자리 페더: destination-in 으로 알파 마스크
+    const g = fctx.createRadialGradient(cw / 2, ch / 2, Math.min(cw, ch) * 0.35, cw / 2, ch / 2, Math.max(cw, ch) * 0.62);
+    g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+    fctx.globalCompositeOperation = 'destination-in'; fctx.fillStyle = g; fctx.fillRect(0, 0, cw, ch);
+    actx.drawImage(feather, x0, y0);
+    result = { before, after };
+    $('#cmpWrap').style.display = ''; $('#btnBack').style.display = '';
+    st.className = 'hint ok'; st.textContent = `완료 · ${((performance.now() - t0) / 1000).toFixed(1)}초 · 슬라이더로 전후 비교`;
+    drawResult();
+  } catch (err) {
+    st.className = 'hint err'; st.textContent = '실패: ' + err.message;
+  } finally { updateTryonBtn(); }
+});
+$('#cmp').addEventListener('input', drawResult);
+$('#btnBack').addEventListener('click', () => {
+  result = null; $('#cmpWrap').style.display = 'none'; $('#btnBack').style.display = 'none';
+  $('#tryonStatus').className = 'hint'; $('#tryonStatus').textContent = '다시 합성하려면 버튼을 눌러요.';
+  if (state.mode === 'video') { lastVideoTime = -1; requestAnimationFrame(loop); }
+  else if (state.mode === 'image') { const res = landmarker.detect(photo); drawFrame(photo, photo.naturalWidth, photo.naturalHeight, res.faceLandmarks?.[0]); }
+});
+function drawResult() {
+  if (!result) return;
+  const { before, after } = result, W = before.width, H = before.height;
+  if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
+  const split = (+$('#cmp').value / 100);
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, W, H);
+  if (state.mirror) { ctx.translate(W, 0); ctx.scale(-1, 1); }
+  // 확대 뷰 유지
+  if (state.zoom && view.init) { ctx.translate(W / 2, H / 2); ctx.scale(view.z, view.z); ctx.translate(-view.cx, -view.cy); }
+  ctx.drawImage(after, 0, 0);
+  // 왼쪽(화면 기준) = 전, 오른쪽 = 후. 거울 반전이면 좌표계도 뒤집혀 있으니 소스 좌표로 환산
+  const sx = state.mirror ? W * (1 - split) : W * split;
+  ctx.save(); ctx.beginPath();
+  if (state.mirror) ctx.rect(sx, -H, W - sx, H * 3); else ctx.rect(-W, -H, sx + W, H * 3);
+  ctx.clip(); ctx.drawImage(before, 0, 0); ctx.restore();
+  ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 2 / (state.zoom && view.init ? view.z : 1);
+  ctx.beginPath(); ctx.moveTo(sx, -H); ctx.lineTo(sx, H * 2); ctx.stroke();
+  ctx.restore();
+  stats.textContent = '정밀 합성 결과 · 전/후 비교';
 }
 </script>
 </body>
