@@ -79,12 +79,16 @@
       </div>
       <div class="row">
         <button class="primary" id="btnTryon" disabled>지금 화면으로 합성</button>
+        <button id="btnStill" style="display:none">정지 전/후 비교</button>
         <button id="btnBack" style="display:none">라이브로 돌아가기</button>
+        <button id="btnGenToggle" style="display:none">생성 속눈썹 끄기</button>
       </div>
-      <div class="hint" id="tryonStatus">카메라(또는 셀카)와 레퍼런스가 둘 다 있으면 눌러요. 눈을 뜬 상태에서 캡처 → 눈 주변만 잘라 이미지 편집 모델에 보내고 → 결과를 원래 자리에 붙여요. 5~20초.</div>
+      <div class="hint" id="tryonStatus">카메라(또는 셀카)와 레퍼런스가 둘 다 있으면 눌러요. 눈 뜬 상태에서 한 번 캡처 → 이미지 편집 모델이 합성 → 속눈썹만 떼어내서 라이브 눈에 스티커처럼 붙여요. 이후엔 실시간.</div>
       <div id="cmpWrap" style="display:none">
         <label>전 ← → 후</label>
         <input type="range" id="cmp" min="0" max="100" value="50">
+      </div>
+      <div id="fbWrap" style="display:none">
         <div class="fb">
           <label>내 눈 같아요? (1 어색 ~ 5 진짜 같음)</label>
           <div class="seg" id="fbMe"><button data-v="1">1</button><button data-v="2">2</button><button data-v="3">3</button><button data-v="4">4</button><button data-v="5">5</button></div>
@@ -254,6 +258,7 @@ let lastLm = null, lastSrc = null, lastW = 0, lastH = 0;   // 캡처용 최근 �
 let refDataUrl = null;                                     // 레퍼런스 원본(축소본)
 let result = null;                                         // {before: canvas, after: canvas, run_id}
 let lastMap = null;                                        // 마지막 번역 결과(사양) — 합성 프롬프트에 같이 보냄
+let liveLayer = null;                                      // 생성 결과에서 떼어낸 속눈썹 레이어 {eyes:[{sprite,rx,ry,src}], show, run_id, before, after}
 const fb = { me: null, ref: null };
 function updateTryonBtn() { $('#btnTryon').disabled = !(refDataUrl && lastLm && state.mode); }
 
@@ -452,7 +457,10 @@ function drawFrame(src, W, H, lm) {
     ctx.translate(W / 2, H / 2); ctx.scale(view.z, view.z); ctx.translate(-view.cx, -view.cy);
   }
   ctx.drawImage(src, 0, 0, W, H);
-  if (lm && state.show) {
+  if (lm && liveLayer && liveLayer.show) {
+    drawLiveLayer(ctx, lm, W, H);
+    stats.textContent = `${fps ? fps + ' fps · ' : ''}생성 속눈썹 라이브 (${liveLayer.run_id})`;
+  } else if (lm && state.show) {
     if (!strands) strands = makeStrands();
     // 얼굴 위 방향: 양 눈 중심 → 이마(10) 방향
     const eyeMid = v2((lm[33].x + lm[263].x) / 2 * W, (lm[33].y + lm[263].y) / 2 * H);
@@ -469,7 +477,71 @@ function drawFrame(src, W, H, lm) {
   ctx.restore();
 }
 
-// ---- 방식 B: 캡처 → 눈 크롭 → 이미지 편집 → 되붙이기 ----
+// ---- 생성 결과 → 속눈썹 레이어 → 랜드마크에 고정 ----
+const EYES = [
+  { inner: 133, outer: 33, top: 159, bot: 145 },   // 이미지 왼쪽 눈
+  { inner: 362, outer: 263, top: 386, bot: 374 },  // 이미지 오른쪽 눈
+];
+function eyeAnchors(lm, e, W, H) {
+  const P = i => v2(lm[i].x * W, lm[i].y * H);
+  const inner = P(e.inner), outer = P(e.outer), top = P(e.top), bot = P(e.bot);
+  // 세 번째 앵커: 윗눈꺼풀에서 (윗-아랫) 만큼 더 위. 눈이 감기면 이 점이 내려와 레이어가 세로로 눌림
+  const up = add(top, sub(top, bot));
+  return [inner, outer, up];
+}
+function buildLiveLayer(before, after, lm, W, H) {
+  const bctx = before.getContext('2d'), actx = after.getContext('2d');
+  const eyes = EYES.map(e => {
+    const P = i => v2(lm[i].x * W, lm[i].y * H);
+    const inner = P(e.inner), outer = P(e.outer), top = P(e.top), bot = P(e.bot);
+    const w = len(sub(outer, inner));
+    // 속눈썹이 뻗을 수 있는 영역: 눈 너비의 ±25%, 위로 0.75w, 아래로 0.15w
+    const rx = Math.max(0, Math.floor(Math.min(inner.x, outer.x) - w * 0.25));
+    const rx2 = Math.min(W, Math.ceil(Math.max(inner.x, outer.x) + w * 0.25));
+    const ry = Math.max(0, Math.floor(Math.min(top.y, inner.y, outer.y) - w * 0.75));
+    const ry2 = Math.min(H, Math.ceil(bot.y + w * 0.15));
+    const rw = rx2 - rx, rh = ry2 - ry;
+    const b = bctx.getImageData(rx, ry, rw, rh).data, a = actx.getImageData(rx, ry, rw, rh).data;
+    // 밝기 차이. 모델이 전체 톤을 살짝 바꿔도 속눈썹만 남도록 중앙값 오프셋 제거
+    const n = rw * rh, diff = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const lb = 0.299 * b[i*4] + 0.587 * b[i*4+1] + 0.114 * b[i*4+2];
+      const la = 0.299 * a[i*4] + 0.587 * a[i*4+1] + 0.114 * a[i*4+2];
+      diff[i] = la - lb;
+    }
+    const sorted = Float32Array.from(diff).sort(); const med = sorted[n >> 1];
+    const sprite = document.createElement('canvas'); sprite.width = rw; sprite.height = rh;
+    const sctx = sprite.getContext('2d'); const out = sctx.createImageData(rw, rh); const o = out.data;
+    for (let i = 0; i < n; i++) {
+      const darkening = -(diff[i] - med);              // 양수 = 전보다 어두워짐 = 속눈썹일 가능성
+      const alpha = Math.max(0, Math.min(1, (darkening - 14) / 45));
+      o[i*4] = a[i*4]; o[i*4+1] = a[i*4+1]; o[i*4+2] = a[i*4+2]; o[i*4+3] = Math.round(alpha * 255);
+    }
+    sctx.putImageData(out, 0, 0);
+    return { sprite, rx, ry, src: eyeAnchors(lm, e, W, H) };
+  });
+  return { eyes };
+}
+// 3점 대응 → 아핀 변환 (src 삼각형을 dst 삼각형으로)
+function affineFrom(src, dst) {
+  const [s0, s1, s2] = src, [d0, d1, d2] = dst;
+  const det = (s0.x - s2.x) * (s1.y - s2.y) - (s1.x - s2.x) * (s0.y - s2.y);
+  if (Math.abs(det) < 1e-6) return null;
+  const a = ((d0.x - d2.x) * (s1.y - s2.y) - (d1.x - d2.x) * (s0.y - s2.y)) / det;
+  const c = ((d1.x - d2.x) * (s0.x - s2.x) - (d0.x - d2.x) * (s1.x - s2.x)) / det;
+  const b = ((d0.y - d2.y) * (s1.y - s2.y) - (d1.y - d2.y) * (s0.y - s2.y)) / det;
+  const d = ((d1.y - d2.y) * (s0.x - s2.x) - (d0.y - d2.y) * (s1.x - s2.x)) / det;
+  const e = d2.x - a * s2.x - c * s2.y, f = d2.y - b * s2.x - d * s2.y;
+  return [a, b, c, d, e, f];
+}
+function drawLiveLayer(c, lm, W, H) {
+  liveLayer.eyes.forEach((eye, i) => {
+    const M = affineFrom(eye.src, eyeAnchors(lm, EYES[i], W, H)); if (!M) return;
+    c.save(); c.transform(...M); c.drawImage(eye.sprite, eye.rx, eye.ry); c.restore();
+  });
+}
+
+// ---- 방식 B: 캡처 → 눈 크롭 → 이미지 편집 → 속눈썹 레이어 ----
 $('#btnTryon').addEventListener('click', async () => {
   const st = $('#tryonStatus');
   if (!lastLm || !lastSrc || !refDataUrl) return;
@@ -498,22 +570,24 @@ $('#btnTryon').addEventListener('click', async () => {
     const m = await r.json();
     if (!r.ok) throw new Error(m.error || r.status);
     const img = new Image(); img.src = m.image; await img.decode();
-    // 결과를 원래 크롭 자리에 되붙이기 (가장자리 부드럽게)
+    // 결과 크롭을 원래 자리에 그대로 덮은 '후' 프레임 (레이어 추출용)
+    const afterRaw = document.createElement('canvas'); afterRaw.width = W; afterRaw.height = H;
+    const arctx = afterRaw.getContext('2d'); arctx.drawImage(before, 0, 0);
+    arctx.drawImage(img, 0, 0, img.width, img.height, x0, y0, cw, ch);
+    // 속눈썹만 떼어내서 눈꺼풀에 고정되는 레이어로
+    liveLayer = buildLiveLayer(before, afterRaw, lm, W, H);
+    liveLayer.run_id = m.run_id; liveLayer.show = true;
+    // 정지 비교용 '후' = 전 + 레이어 (사각형 자국 없음)
     const after = document.createElement('canvas'); after.width = W; after.height = H;
     const actx = after.getContext('2d'); actx.drawImage(before, 0, 0);
-    const feather = document.createElement('canvas'); feather.width = cw; feather.height = ch;
-    const fctx = feather.getContext('2d');
-    fctx.drawImage(img, 0, 0, img.width, img.height, 0, 0, cw, ch);
-    // 가장자리 페더: destination-in 으로 알파 마스크
-    const g = fctx.createRadialGradient(cw / 2, ch / 2, Math.min(cw, ch) * 0.35, cw / 2, ch / 2, Math.max(cw, ch) * 0.62);
-    g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)');
-    fctx.globalCompositeOperation = 'destination-in'; fctx.fillStyle = g; fctx.fillRect(0, 0, cw, ch);
-    actx.drawImage(feather, x0, y0);
-    result = { before, after, run_id: m.run_id };
+    drawLiveLayer(actx, lm, W, H);
+    liveLayer.before = before; liveLayer.after = after;
+    result = null;
     fb.me = null; fb.ref = null; setSeg('#fbMe', ''); setSeg('#fbRef', ''); $('#fbNote').value = ''; $('#fbStatus').textContent = '';
-    $('#cmpWrap').style.display = ''; $('#btnBack').style.display = '';
-    st.className = 'hint ok'; st.textContent = `완료 (${state.engine}) · ${((performance.now() - t0) / 1000).toFixed(1)}초 · 슬라이더로 전후 비교`;
-    drawResult();
+    $('#fbWrap').style.display = ''; $('#btnStill').style.display = ''; $('#btnGenToggle').style.display = ''; $('#btnGenToggle').textContent = '생성 속눈썹 끄기';
+    st.className = 'hint ok'; st.textContent = `완료 (${state.engine}) · ${((performance.now() - t0) / 1000).toFixed(1)}초 · 라이브에 붙였어요. 움직여 보세요.`;
+    if (state.mode === 'video') { lastVideoTime = -1; requestAnimationFrame(loop); }
+    else { const res = landmarker.detect(photo); drawFrame(photo, photo.naturalWidth, photo.naturalHeight, res.faceLandmarks?.[0]); }
   } catch (err) {
     st.className = 'hint err'; st.textContent = '실패: ' + err.message;
   } finally { updateTryonBtn(); }
@@ -523,15 +597,23 @@ seg('#fbMe', v => { fb.me = +v; });
 seg('#fbRef', v => { fb.ref = +v; });
 $('#fbSave').addEventListener('click', async () => {
   const st = $('#fbStatus');
-  if (!result?.run_id) return;
+  if (!liveLayer?.run_id) return;
   if (!fb.me || !fb.ref) { st.textContent = '점수 둘 다 골라주세요'; return; }
   const r = await fetch('/api/feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ run_id: result.run_id, looks_like_me: fb.me, matches_reference: fb.ref, note: $('#fbNote').value }) });
-  st.textContent = r.ok ? `저장됨 (runs/${result.run_id})` : '저장 실패';
+    body: JSON.stringify({ run_id: liveLayer.run_id, looks_like_me: fb.me, matches_reference: fb.ref, note: $('#fbNote').value }) });
+  st.textContent = r.ok ? `저장됨 (runs/${liveLayer.run_id})` : '저장 실패';
+});
+$('#btnStill').addEventListener('click', () => {
+  if (!liveLayer) return;
+  result = { before: liveLayer.before, after: liveLayer.after };
+  $('#cmpWrap').style.display = ''; $('#btnBack').style.display = ''; $('#btnStill').style.display = 'none';
+  drawResult();
+});
+$('#btnGenToggle').addEventListener('click', e => {
+  if (!liveLayer) return; liveLayer.show = !liveLayer.show; e.target.textContent = liveLayer.show ? '생성 속눈썹 끄기' : '생성 속눈썹 켜기';
 });
 $('#btnBack').addEventListener('click', () => {
-  result = null; $('#cmpWrap').style.display = 'none'; $('#btnBack').style.display = 'none';
-  $('#tryonStatus').className = 'hint'; $('#tryonStatus').textContent = '다시 합성하려면 버튼을 눌러요.';
+  result = null; $('#cmpWrap').style.display = 'none'; $('#btnBack').style.display = 'none'; $('#btnStill').style.display = '';
   if (state.mode === 'video') { lastVideoTime = -1; requestAnimationFrame(loop); }
   else if (state.mode === 'image') { const res = landmarker.detect(photo); drawFrame(photo, photo.naturalWidth, photo.naturalHeight, res.faceLandmarks?.[0]); }
 });
