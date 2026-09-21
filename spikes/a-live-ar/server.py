@@ -7,6 +7,7 @@ import base64
 import json
 import os
 import sys
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 import urllib.error
@@ -103,9 +104,31 @@ def translate(image_b64: str, media_type: str) -> dict:
 
 
 TRYON_PROMPT = """Image 1 is a close-up photo of a person's eyes. Image 2 is a reference photo of eyelash extensions done at a lash salon.
-Edit image 1 so the person is wearing eyelash extensions that reproduce image 2 as faithfully as possible: the same curl, the same lengths per zone (inner corner to outer corner), the same density, the same spiky/wispy or even pattern, the same lash color.
+Edit image 1 so the person is wearing eyelash extensions that COPY image 2's lashes: the same curl, the same lengths per zone (inner corner to outer corner), the same density, the same spiky/wispy or even pattern, the same lash color.
+Do not reinterpret, stylize, or "improve" the design. Do not make the lashes longer, thicker, or more dramatic than image 2. If image 2 has a few spikes, make the same number of spikes in the same places along the lid.
 Keep everything else in image 1 exactly as it is: eye shape and size, eyelids, skin texture, iris, eyebrows, lighting, framing, resolution. Do not enlarge the eyes, do not retouch the skin, do not add eyeliner or other makeup, do not change the face.
 Return only the edited version of image 1, same size and framing."""
+
+CURL_DESC = {"J": "J curl (nearly straight, slight lift)", "C": "C curl (standard lift)", "D": "D curl (strong lift, curls up toward the lid)"}
+VOL_DESC = {"natural": "classic 1:1, sparse", "volume": "2D-4D volume, dense", "mega": "mega volume 5D+, very dense"}
+STYLE_DESC = {"natural": "even length across the lid", "cat": "cat-eye: longer toward the outer corner", "doll": "doll-eye: longest at the center"}
+TEX_DESC = {"even": "evenly aligned tips", "wispy": "wispy: clusters gathered into pointed spikes with shorter lashes between them"}
+
+
+def spec_text(m: dict) -> str:
+    """번역된 래시 맵을 프롬프트용 사양 문장으로. 해석 여지를 줄이는 용도."""
+    if not m:
+        return ""
+    z = m.get("zone_lengths_mm") or []
+    parts = [
+        f"Measured spec of image 2 (follow it exactly): {CURL_DESC.get(m.get('curl'), m.get('curl'))}",
+        f"lengths from inner corner to outer corner: {', '.join(str(x) for x in z)} mm" if len(z) == 5 else "",
+        f"density: {VOL_DESC.get(m.get('volume'), m.get('volume'))}",
+        f"shape: {STYLE_DESC.get(m.get('style'), m.get('style'))}",
+        f"texture: {TEX_DESC.get(m.get('texture'), m.get('texture'))}",
+        f"notes: {m['notes']}" if m.get("notes") else "",
+    ]
+    return "\n" + "; ".join(x for x in parts if x) + "."
 
 
 def split_data_url(data_url: str):
@@ -113,7 +136,7 @@ def split_data_url(data_url: str):
     return header[5:].split(";")[0], b64
 
 
-def gemini_tryon(frame_b64: str, frame_mime: str, ref_b64: str, ref_mime: str) -> tuple[str, str]:
+def gemini_tryon(frame_b64: str, frame_mime: str, ref_b64: str, ref_mime: str, prompt: str) -> tuple[str, str]:
     """Returns (mime_type, base64) of the edited image."""
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
@@ -123,7 +146,7 @@ def gemini_tryon(frame_b64: str, frame_mime: str, ref_b64: str, ref_mime: str) -
         "contents": [{
             "role": "user",
             "parts": [
-                {"text": TRYON_PROMPT},
+                {"text": prompt},
                 {"inlineData": {"mimeType": frame_mime, "data": frame_b64}},
                 {"inlineData": {"mimeType": ref_mime, "data": ref_b64}},
             ],
@@ -151,7 +174,7 @@ def gemini_tryon(frame_b64: str, frame_mime: str, ref_b64: str, ref_mime: str) -
     raise RuntimeError("이미지가 안 돌아왔어요: " + (" ".join(texts)[:300] or json.dumps(resp)[:300]))
 
 
-def openai_tryon(frame_b64: str, frame_mime: str, ref_b64: str, ref_mime: str) -> tuple[str, str]:
+def openai_tryon(frame_b64: str, frame_mime: str, ref_b64: str, ref_mime: str, prompt: str) -> tuple[str, str]:
     """OpenAI Images edit: image[] 여러 장 + prompt. input_fidelity=high 로 얼굴 보존."""
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
@@ -163,7 +186,7 @@ def openai_tryon(frame_b64: str, frame_mime: str, ref_b64: str, ref_mime: str) -
     ]
     data = {
         "model": OPENAI_IMAGE_MODEL,
-        "prompt": TRYON_PROMPT + "\n(The first image is image 1, the second image is image 2.)",
+        "prompt": prompt + "\n(The first image is image 1, the second image is image 2.)",
         "size": "1536x1024",
         "quality": "high",
         "input_fidelity": "high",
@@ -202,6 +225,8 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/api/tryon":
             return self.do_tryon()
+        if self.path == "/api/feedback":
+            return self.do_feedback()
         if self.path != "/api/lashmap":
             return self._json(404, {"error": "not found"})
         n = int(self.headers.get("Content-Length", 0))
@@ -231,11 +256,46 @@ class Handler(SimpleHTTPRequestHandler):
             engine = req.get("engine", "gemini")
             if engine not in ENGINES:
                 return self._json(400, {"error": f"unknown engine {engine}"})
-            mime, b64 = ENGINES[engine](fb, fm, rb, rm)
-            sys.stderr.write("tryon[%s]: ok %s %d bytes\n" % (engine, mime, len(b64)))
-            return self._json(200, {"image": f"data:{mime};base64,{b64}"})
+            prompt = TRYON_PROMPT + spec_text(req.get("lashmap"))
+            t0 = time.time()
+            mime, b64 = ENGINES[engine](fb, fm, rb, rm, prompt)
+            run_id = time.strftime("%Y%m%d-%H%M%S")
+            # 실험 기록: 입력/출력 이미지 + 메타 (runs/ 는 gitignore)
+            d = os.path.join(HERE, "runs", run_id); os.makedirs(d, exist_ok=True)
+            for name, mt, data in (("frame", fm, fb), ("reference", rm, rb), ("result", mime, b64)):
+                with open(os.path.join(d, name + "." + mt.split("/")[-1].replace("jpeg", "jpg")), "wb") as f:
+                    f.write(base64.b64decode(data))
+            meta = {"run_id": run_id, "engine": engine, "model": OPENAI_IMAGE_MODEL if engine == "openai" else GEMINI_IMAGE_MODEL,
+                    "seconds": round(time.time() - t0, 1), "lashmap": req.get("lashmap"), "prompt": prompt}
+            with open(os.path.join(d, "meta.json"), "w") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=1)
+            sys.stderr.write("tryon[%s] %s: ok %s %d bytes %.1fs\n" % (engine, run_id, mime, len(b64), meta["seconds"]))
+            return self._json(200, {"image": f"data:{mime};base64,{b64}", "run_id": run_id, "seconds": meta["seconds"]})
         except Exception as e:  # noqa: BLE001
             sys.stderr.write("tryon: ERR %s\n" % e)
+            return self._json(500, {"error": str(e)})
+
+
+    def do_feedback(self):
+        """합성 결과 평가 저장: runs/<run_id>/meta.json 에 합치고 runs/log.jsonl 에 한 줄 추가."""
+        n = int(self.headers.get("Content-Length", 0))
+        try:
+            fb = json.loads(self.rfile.read(n))
+            run_id = fb.get("run_id", "")
+            d = os.path.join(HERE, "runs", run_id)
+            if not run_id or not os.path.isdir(d):
+                return self._json(404, {"error": "run not found"})
+            with open(os.path.join(d, "meta.json")) as f:
+                meta = json.load(f)
+            meta["feedback"] = {k: fb.get(k) for k in ("looks_like_me", "matches_reference", "note")}
+            with open(os.path.join(d, "meta.json"), "w") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=1)
+            row = {k: meta.get(k) for k in ("run_id", "engine", "model", "seconds")}
+            row.update(meta["feedback"]); row["lashmap"] = meta.get("lashmap")
+            with open(os.path.join(HERE, "runs", "log.jsonl"), "a") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            return self._json(200, {"ok": True})
+        except Exception as e:  # noqa: BLE001
             return self._json(500, {"error": str(e)})
 
 
