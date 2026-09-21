@@ -69,6 +69,16 @@
         <img id="refThumb" alt="" style="display:none;height:44px;border-radius:6px;object-fit:cover">
       </div>
       <div class="hint" id="refStatus">인스타 스크린샷을 올리면 컬·구간 길이·볼륨·스타일·질감으로 번역해서 내 눈에 바로 적용해요. 카메라 화면은 그대로예요.</div>
+      <div id="pickWrap" style="display:none">
+        <label>사진 그대로 붙이기 (방식 C) — 레퍼런스 위에 <b id="pickStep">① 눈앞(안쪽 끝)</b> 클릭</label>
+        <canvas id="pickCanvas" style="width:100%;border-radius:8px;cursor:crosshair;background:#000"></canvas>
+        <div class="row">
+          <button id="pickReset">점 다시 찍기</button>
+          <button class="primary" id="btnPixel" disabled>이 속눈썹을 내 눈에 붙이기</button>
+          <button id="btnPixelOff" style="display:none">떼기</button>
+        </div>
+        <div class="hint" id="pickStatus">순서: 눈앞(코 쪽 끝) → 눈꼬리(바깥 끝) → 윗눈꺼풀 라인 중앙(속눈썹 뿌리). 확대해서 찍으려면 트랙패드로 핀치.</div>
+      </div>
     </div>
 
     <div class="ref">
@@ -228,6 +238,8 @@ $('#refFile').addEventListener('change', async e => {
   // 긴 변 1024px로 줄여서 전송 (비용·속도)
   const dataUrl = await downscale(f, 1024);
   refDataUrl = dataUrl; updateTryonBtn();
+  refImg = new Image(); refImg.src = dataUrl; await refImg.decode();
+  pick.pts = []; $('#pickWrap').style.display = ''; drawPick();
   try {
     const r = await fetch('/api/lashmap', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: dataUrl }) });
     const m = await r.json();
@@ -259,6 +271,8 @@ let refDataUrl = null;                                     // 레퍼런스 원�
 let result = null;                                         // {before: canvas, after: canvas, run_id}
 let lastMap = null;                                        // 마지막 번역 결과(사양) — 합성 프롬프트에 같이 보냄
 let liveLayer = null;                                      // 생성 결과에서 떼어낸 속눈썹 레이어 {eyes:[{sprite,rx,ry,src}], show, run_id, before, after}
+let refImg = null;                                         // 레퍼런스 원본 Image
+const pick = { pts: [] };                                  // 레퍼런스 위 3점 (레퍼런스 픽셀 좌표)
 const fb = { me: null, ref: null };
 function updateTryonBtn() { $('#btnTryon').disabled = !(refDataUrl && lastLm && state.mode); }
 
@@ -559,8 +573,9 @@ function affineFrom(src, dst) {
 function drawLiveLayer(c, lm, W, H, smooth = true) {
   liveLayer.eyes.forEach((eye, i) => {
     const now = eyeAnchors(lm, EYES[i], W, H);
+    if (eye.pixel) eye.openAtCapture = Math.max(eye.openAtCapture === 0.3 ? 0 : eye.openAtCapture, now.openRatio); // 픽셀 이식은 첫 프레임들에서 최대 개방도 학습
     // 깜빡임: 개방도 비율만큼 세로로 눌림 (0.25~1.15로 제한)
-    const k = Math.max(0.25, Math.min(1.15, now.openRatio / eye.openAtCapture));
+    const k = Math.max(0.25, Math.min(1.15, now.openRatio / Math.max(0.05, eye.openAtCapture)));
     let dst = eyeAnchors(lm, EYES[i], W, H, k).pts;
     if (smooth) { // 프레임 간 lerp로 떨림 완화
       if (!eye.smooth) eye.smooth = dst.map(p => ({ ...p }));
@@ -571,6 +586,101 @@ function drawLiveLayer(c, lm, W, H, smooth = true) {
     c.save(); c.transform(...M); c.drawImage(eye.sprite, eye.rx, eye.ry); c.restore();
   });
 }
+
+// ---- 방식 C: 레퍼런스 속눈썹 픽셀 이식 ----
+const pickCanvas = $('#pickCanvas'), pctx = pickCanvas.getContext('2d');
+const PICK_LABELS = ['① 눈앞(안쪽 끝)', '② 눈꼬리(바깥 끝)', '③ 윗눈꺼풀 라인 중앙', '완료 — 아래 버튼'];
+function drawPick() {
+  if (!refImg) return;
+  pickCanvas.width = refImg.width; pickCanvas.height = refImg.height;
+  pctx.drawImage(refImg, 0, 0);
+  pick.pts.forEach((p, i) => {
+    pctx.fillStyle = ['#ff5c8a', '#5cc8ff', '#ffe45c'][i]; pctx.beginPath(); pctx.arc(p.x, p.y, Math.max(4, refImg.width / 120), 0, Math.PI * 2); pctx.fill();
+  });
+  $('#pickStep').textContent = PICK_LABELS[pick.pts.length];
+  $('#btnPixel').disabled = pick.pts.length < 3;
+}
+pickCanvas.addEventListener('click', e => {
+  if (!refImg || pick.pts.length >= 3) return;
+  const r = pickCanvas.getBoundingClientRect();
+  pick.pts.push(v2((e.clientX - r.left) * pickCanvas.width / r.width, (e.clientY - r.top) * pickCanvas.height / r.height));
+  drawPick();
+});
+$('#pickReset').addEventListener('click', () => { pick.pts = []; drawPick(); });
+
+// 레퍼런스에서 윗눈꺼풀 띠 안의 어두운 가닥만 알파로 떼어낸 스프라이트 (한쪽 눈)
+function extractRefLashes() {
+  const [inner, outer, top] = pick.pts;
+  const axis = sub(outer, inner), w = len(axis) || 1;
+  let perp = v2(-axis.y, axis.x);
+  const mid = mul(add(inner, outer), 0.5);
+  if ((perp.x * (top.x - mid.x) + perp.y * (top.y - mid.y)) < 0) perp = mul(perp, -1); // 윗눈꺼풀 쪽
+  const up = norm(perp);
+  // 눈꺼풀 라인 근사: inner → top → outer 를 지나는 2차 곡선 (t: 0~1)
+  const lidAt = t => { const m = 1 - t; const c = sub(mul(top, 2), mul(add(inner, outer), 0.5)); // 제어점: top이 곡선 위에 오도록
+    return v2(m*m*inner.x + 2*m*t*c.x + t*t*outer.x, m*m*inner.y + 2*m*t*c.y + t*t*outer.y); };
+  const rx = Math.max(0, Math.floor(Math.min(inner.x, outer.x, top.x) - w * 0.3));
+  const rx2 = Math.min(refImg.width, Math.ceil(Math.max(inner.x, outer.x, top.x) + w * 0.3));
+  const ry = Math.max(0, Math.floor(Math.min(inner.y, outer.y, top.y) - w * 0.9));
+  const ry2 = Math.min(refImg.height, Math.ceil(Math.max(inner.y, outer.y, top.y) + w * 0.5));
+  const rw = rx2 - rx, rh = ry2 - ry;
+  const src = pctx.getImageData(rx, ry, rw, rh).data; // pickCanvas엔 점이 그려져 있으니 원본에서 다시
+  const tmp = document.createElement('canvas'); tmp.width = rw; tmp.height = rh;
+  tmp.getContext('2d').drawImage(refImg, rx, ry, rw, rh, 0, 0, rw, rh);
+  const d = tmp.getContext('2d').getImageData(0, 0, rw, rh).data;
+  const n = rw * rh, lum = new Float32Array(n);
+  for (let i = 0; i < n; i++) lum[i] = 0.299 * d[i*4] + 0.587 * d[i*4+1] + 0.114 * d[i*4+2];
+  // 배경 밝기: 띠 안 픽셀의 상위 30% 밝기 (눈꺼풀 피부)
+  const inBand = [];
+  const bandOf = (px, py) => { // 라인 기준 수직 거리(위 음수) 와 축 방향 위치 t
+    const p = v2(px, py), rel = sub(p, inner), t = Math.max(0, Math.min(1, (rel.x * axis.x + rel.y * axis.y) / (w * w)));
+    const L = lidAt(t); const dv = (p.x - L.x) * up.x + (p.y - L.y) * up.y; // 양수 = 라인 위(속눈썹 쪽)
+    return { dv, t };
+  };
+  for (let i = 0; i < n; i++) { const { dv, t } = bandOf(rx + i % rw, ry + Math.floor(i / rw)); if (dv > -w * 0.05 && dv < w * 0.8 && t > -0.05 && t < 1.05) inBand.push(lum[i]); }
+  inBand.sort((a, b) => a - b); const bg = inBand[Math.floor(inBand.length * 0.7)] || 200;
+  const sprite = document.createElement('canvas'); sprite.width = rw; sprite.height = rh;
+  const sctx = sprite.getContext('2d'); const out = sctx.createImageData(rw, rh); const o = out.data;
+  for (let i = 0; i < n; i++) {
+    const px = rx + i % rw, py = ry + Math.floor(i / rw);
+    const { dv, t } = bandOf(px, py);
+    let band = 0;
+    if (dv >= -w * 0.06 && dv <= w * 0.85 && t >= -0.03 && t <= 1.03) band = dv > w * 0.65 ? (w * 0.85 - dv) / (w * 0.2) : 1;
+    const dark = bg - lum[i];                         // 배경보다 얼마나 어두운가
+    const alpha = Math.max(0, Math.min(1, (dark - 28) / 70)) * band;
+    o[i*4] = d[i*4]; o[i*4+1] = d[i*4+1]; o[i*4+2] = d[i*4+2]; o[i*4+3] = Math.round(alpha * 255);
+  }
+  sctx.putImageData(out, 0, 0);
+  // 앵커: 눈앞, 눈꼬리, 중앙에서 눈 너비만큼 위 (레퍼런스 좌표, 스프라이트는 rx,ry 오프셋)
+  const anchors = [inner, outer, add(mid, mul(up, w))];
+  return { sprite, rx, ry, anchors, w };
+}
+// 반대쪽 눈용: 스프라이트 좌우 반전 + 앵커도 반전
+function mirrorSprite(L) {
+  const m = document.createElement('canvas'); m.width = L.sprite.width; m.height = L.sprite.height;
+  const c = m.getContext('2d'); c.translate(m.width, 0); c.scale(-1, 1); c.drawImage(L.sprite, 0, 0);
+  const fx = p => v2(2 * L.rx + L.sprite.width - p.x, p.y);
+  return { sprite: m, rx: L.rx, ry: L.ry, anchors: L.anchors.map(fx), w: L.w };
+}
+$('#btnPixel').addEventListener('click', () => {
+  if (pick.pts.length < 3 || !lastLm) { $('#pickStatus').textContent = '카메라를 먼저 켜고 얼굴이 잡힌 상태에서 눌러요.'; return; }
+  const one = extractRefLashes(), two = mirrorSprite(one);
+  // 레퍼런스가 이미지상 왼쪽 눈인지 오른쪽 눈인지: 눈앞이 눈꼬리보다 오른쪽이면 이미지 왼쪽 눈(피사체 오른눈)
+  const [inner, outer] = pick.pts;
+  const refIsImgLeft = inner.x > outer.x;
+  const forImgLeft = refIsImgLeft ? one : two, forImgRight = refIsImgLeft ? two : one;
+  liveLayer = {
+    eyes: [
+      { sprite: forImgLeft.sprite, rx: forImgLeft.rx, ry: forImgLeft.ry, src: forImgLeft.anchors, openAtCapture: 0.3, smooth: null, pixel: true },
+      { sprite: forImgRight.sprite, rx: forImgRight.rx, ry: forImgRight.ry, src: forImgRight.anchors, openAtCapture: 0.3, smooth: null, pixel: true },
+    ],
+    show: true, run_id: 'pixel-' + Date.now(), before: null, after: null, pixel: true,
+  };
+  $('#btnPixelOff').style.display = ''; $('#btnGenToggle').style.display = 'none';
+  $('#pickStatus').className = 'hint ok'; $('#pickStatus').textContent = '붙였어요. 라이브에서 움직여 보세요. 길이는 레퍼런스 눈 너비 대비 비율로 맞춰져요.';
+  if (state.mode === 'video') { lastVideoTime = -1; requestAnimationFrame(loop); }
+});
+$('#btnPixelOff').addEventListener('click', e => { liveLayer = null; e.target.style.display = 'none'; $('#pickStatus').className = 'hint'; $('#pickStatus').textContent = '뗐어요.'; });
 
 // ---- 방식 B: 캡처 → 눈 크롭 → 이미지 편집 → 속눈썹 레이어 ----
 $('#btnTryon').addEventListener('click', async () => {
@@ -637,7 +747,7 @@ $('#fbSave').addEventListener('click', async () => {
   st.textContent = r.ok ? `저장됨 (runs/${liveLayer.run_id})` : '저장 실패';
 });
 $('#btnStill').addEventListener('click', () => {
-  if (!liveLayer) return;
+  if (!liveLayer || !liveLayer.before) return;
   result = { before: liveLayer.before, after: liveLayer.after };
   $('#cmpWrap').style.display = ''; $('#btnBack').style.display = ''; $('#btnStill').style.display = 'none';
   drawResult();
