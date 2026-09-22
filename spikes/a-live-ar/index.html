@@ -300,7 +300,12 @@ $('#refFile').addEventListener('change', async e => {
     st.className = 'hint ok';
     st.textContent = `${m.curl}컬 · ${m.zone_lengths_mm.join('-')}mm · ${m.volume} · ${m.style} · 확신 ${Math.round(m.confidence * 100)}%
 ${m.notes}`;
-  } catch (err) { st.className = 'hint err'; st.textContent = '실패: ' + err.message; }
+  } catch (err) {
+    st.className = 'hint err';
+    const quota = /429|credit|quota/i.test(err.message);
+    st.textContent = (quota ? 'OpenAI 크레딧이 없어서 자동 인식이 안 돼요. ' : '자동 인식 실패: ' + err.message + ' ') + '아래 사진에서 눈앞 → 눈꼬리 → 속눈썹 뿌리 중앙 순서로 3점을 찍으면 붙일 수 있어요.';
+    $('#pickWrap').style.display = ''; $('#btnPickToggle').style.display = ''; pick.pts = []; pick.root = null; drawPick();
+  }
 });
 function downscale(file, max) {
   return new Promise(res => {
@@ -815,7 +820,7 @@ pickCanvas.addEventListener('pointerdown', e => {
   pick.pts.forEach((q, i) => { const d = len(sub(q, p)); if (d < bd) { bd = d; best = { kind: 'pt', idx: i }; } });
   (pick.root || []).forEach((q, i) => { const d = len(sub(q, p)); if (d < bd) { bd = d; best = { kind: 'root', idx: i }; } });
   if (best) { dragging = best; pickCanvas.setPointerCapture(e.pointerId); pick.auto = false; return; }
-  if (pick.pts.length < 3) { pick.pts.push(p); if (pick.pts.length === 3) pick.root = null; drawPick(); }
+  if (pick.pts.length < 3) { pick.pts.push(p); if (pick.pts.length === 3) { pick.root = null; $('#pickStatus').className = 'hint ok'; $('#pickStatus').textContent = '3점 완료. "이 속눈썹을 내 눈에 붙이기"를 누르세요.'; } drawPick(); }
 });
 pickCanvas.addEventListener('pointermove', e => {
   if (!dragging) return; const p = pickPos(e);
