@@ -165,6 +165,11 @@ Do not reinterpret, stylize, or "improve" the design. Do not make the lashes lon
 Keep everything else in image 1 exactly as it is: eye shape and size, eyelids, skin texture, iris, eyebrows, lighting, framing, resolution. Do not enlarge the eyes, do not retouch the skin, do not add eyeliner or other makeup, do not change the face.
 Return only the edited version of image 1, same size and framing."""
 
+GUIDED_PROMPT = """Image 1 is a close-up photo of a person's eyes with a ROUGH OVERLAY of eyelash extensions already drawn in place (dark strands on the upper lash line). Image 2 is the salon reference photo of the same lash design.
+Turn image 1 into a photorealistic photo of this person actually wearing these eyelash extensions. The overlay already has the correct placement, lengths per zone, spike pattern and curl — keep those exactly where they are; do not lengthen, thicken, move or restyle them. Replace the flat drawn strands with realistic individual lashes that match image 2's texture, sheen and color, blended into the person's own lashes, lid and lighting.
+Keep everything else in image 1 exactly as it is: eye shape and size, eyelids, skin texture, iris, eyebrows, lighting, framing, resolution. No skin retouching, no eyeliner, no other makeup, no face changes.
+Return only the edited version of image 1, same size and framing."""
+
 CURL_DESC = {"J": "J curl (nearly straight, slight lift)", "C": "C curl (standard lift)", "D": "D curl (strong lift, curls up toward the lid)"}
 VOL_DESC = {"natural": "classic 1:1, sparse", "volume": "2D-4D volume, dense", "mega": "mega volume 5D+, very dense"}
 STYLE_DESC = {"natural": "even length across the lid", "cat": "cat-eye: longer toward the outer corner", "doll": "doll-eye: longest at the center"}
@@ -322,7 +327,7 @@ class Handler(SimpleHTTPRequestHandler):
             engine = req.get("engine", "gemini")
             if engine not in ENGINES:
                 return self._json(400, {"error": f"unknown engine {engine}"})
-            prompt = TRYON_PROMPT + spec_text(req.get("lashmap"))
+            prompt = (GUIDED_PROMPT if req.get("guided") else TRYON_PROMPT) + spec_text(req.get("lashmap"))
             t0 = time.time()
             mime, b64 = ENGINES[engine](fb, fm, rb, rm, prompt)
             run_id = time.strftime("%Y%m%d-%H%M%S")
@@ -331,7 +336,7 @@ class Handler(SimpleHTTPRequestHandler):
             for name, mt, data in (("frame", fm, fb), ("reference", rm, rb), ("result", mime, b64)):
                 with open(os.path.join(d, name + "." + mt.split("/")[-1].replace("jpeg", "jpg")), "wb") as f:
                     f.write(base64.b64decode(data))
-            meta = {"run_id": run_id, "engine": engine, "model": OPENAI_IMAGE_MODEL if engine == "openai" else GEMINI_IMAGE_MODEL,
+            meta = {"run_id": run_id, "engine": engine, "guided": bool(req.get("guided")), "model": OPENAI_IMAGE_MODEL if engine == "openai" else GEMINI_IMAGE_MODEL,
                     "seconds": round(time.time() - t0, 1), "lashmap": req.get("lashmap"), "prompt": prompt}
             with open(os.path.join(d, "meta.json"), "w") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=1)
