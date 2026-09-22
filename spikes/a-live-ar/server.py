@@ -108,6 +108,53 @@ def translate(image_b64: str, media_type: str) -> dict:
     return data
 
 
+EYEPOINTS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "inner_corner_x": {"type": "number"}, "inner_corner_y": {"type": "number"},
+        "outer_corner_x": {"type": "number"}, "outer_corner_y": {"type": "number"},
+        # 윗눈꺼풀 속눈썹 뿌리 라인: 눈앞→눈꼬리 등간격 5점
+        "root_x0": {"type": "number"}, "root_y0": {"type": "number"},
+        "root_x1": {"type": "number"}, "root_y1": {"type": "number"},
+        "root_x2": {"type": "number"}, "root_y2": {"type": "number"},
+        "root_x3": {"type": "number"}, "root_y3": {"type": "number"},
+        "root_x4": {"type": "number"}, "root_y4": {"type": "number"},
+        "confidence": {"type": "number"},
+    },
+    "required": ["inner_corner_x", "inner_corner_y", "outer_corner_x", "outer_corner_y",
+                 "root_x0", "root_y0", "root_x1", "root_y1", "root_x2", "root_y2", "root_x3", "root_y3", "root_x4", "root_y4", "confidence"],
+    "additionalProperties": False,
+}
+
+EYEPOINTS_PROMPT = """이 이미지는 한쪽 눈을 크게 자른 사진입니다. 이미지 폭·높이 대비 0~1 좌표로 다음을 정확히 찍으세요.
+- inner_corner: 코 쪽 눈구석(눈물점). 눈 구멍(흰자/눈동자가 보이는 영역)의 안쪽 끝점.
+- outer_corner: 바깥 눈꼬리. 눈 구멍의 바깥 끝점. 속눈썹 끝이 아니라 눈꺼풀이 만나는 지점.
+- root_0..root_4: 윗눈꺼풀의 속눈썹이 피부에서 나오는 뿌리 라인을 눈앞(root_0)에서 눈꼬리(root_4)까지 등간격 5점. 이 라인은 눈 구멍의 위쪽 경계와 거의 같고, 속눈썹 가닥의 아래 끝입니다. 쌍꺼풀 선이나 눈썹이 아닙니다. 눈동자 바로 위를 지납니다.
+- confidence: 0~1.
+"""
+
+
+def eyepoints(image_b64: str, media_type: str) -> dict:
+    key = os.environ.get("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY가 없어요.")
+    body = {
+        "model": OPENAI_VISION_MODEL,
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}", "detail": "high"}},
+            {"type": "text", "text": EYEPOINTS_PROMPT},
+        ]}],
+        "response_format": {"type": "json_schema", "json_schema": {"name": "eye_points", "strict": True, "schema": EYEPOINTS_SCHEMA}},
+    }
+    r = requests.post("https://api.openai.com/v1/chat/completions", headers={"Authorization": f"Bearer {key}"}, json=body, timeout=120)
+    if r.status_code != 200:
+        raise RuntimeError(f"OpenAI {r.status_code}: {r.text[:600]}")
+    msg = r.json()["choices"][0]["message"]
+    if msg.get("refusal"):
+        raise RuntimeError("model refused: " + msg["refusal"])
+    return json.loads(msg["content"])
+
+
 TRYON_PROMPT = """Image 1 is a close-up photo of a person's eyes. Image 2 is a reference photo of eyelash extensions done at a lash salon.
 Edit image 1 so the person is wearing eyelash extensions that COPY image 2's lashes: the same curl, the same lengths per zone (inner corner to outer corner), the same density, the same spiky/wispy or even pattern, the same lash color.
 Do not reinterpret, stylize, or "improve" the design. Do not make the lashes longer, thicker, or more dramatic than image 2. If image 2 has a few spikes, make the same number of spikes in the same places along the lid.
@@ -232,6 +279,16 @@ class Handler(SimpleHTTPRequestHandler):
             return self.do_tryon()
         if self.path == "/api/feedback":
             return self.do_feedback()
+        if self.path == "/api/eyepoints":
+            n = int(self.headers.get("Content-Length", 0))
+            try:
+                req = json.loads(self.rfile.read(n))
+                mt, b64 = split_data_url(req["image"])
+                out = eyepoints(b64, mt)
+                sys.stderr.write("eyepoints: %s\n" % json.dumps(out))
+                return self._json(200, out)
+            except Exception as e:  # noqa: BLE001
+                return self._json(500, {"error": str(e)})
         if self.path != "/api/lashmap":
             return self._json(404, {"error": "not found"})
         n = int(self.headers.get("Content-Length", 0))
