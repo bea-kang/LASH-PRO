@@ -496,7 +496,13 @@ function drawFrame(src, W, H, lm) {
   ctx.drawImage(src, 0, 0, W, H);
   if (lm && liveLayer && liveLayer.show) {
     drawLiveLayer(ctx, lm, W, H);
-    stats.textContent = `${fps ? fps + ' fps · ' : ''}생성 속눈썹 라이브 (${liveLayer.run_id})`;
+    const ew = len(sub(v2(lm[33].x * W, lm[33].y * H), v2(lm[133].x * W, lm[133].y * H)));
+    if (ew < 140) { // 눈이 작으면 어떤 방식이든 가닥이 뭉개짐 → 가까이 오라고 안내
+      ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.font = `${Math.round(H / 22)}px sans-serif`; ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, H * 0.06, W, H / 12);
+      ctx.fillStyle = '#fff'; ctx.fillText('카메라에 더 가까이 오세요 (눈이 화면 폭의 1/4 이상)', W / 2, H * 0.06 + H / 16); ctx.restore();
+    }
+    stats.textContent = `${fps ? fps + ' fps · ' : ''}속눈썹 라이브 · 눈 ${Math.round(ew)}px · 톤 ${(liveLayer.tone || 1).toFixed(2)}`;
   } else if (lm && state.show) {
     if (!strands) strands = makeStrands();
     // 얼굴 위 방향: 양 눈 중심 → 이마(10) 방향
@@ -638,15 +644,18 @@ function localNormal(at, t, globalUp) {
 const LASH_H = 0.7; // 조각 높이: 뿌리에서 눈 너비의 70%까지
 let toneTick = 0;
 function measureTone(c, U) {
-  // 현재 캔버스(비디오만 그려진 상태)에서 눈꺼풀 위 피부 8x8 샘플 → 레퍼런스 피부 밝기와 비율
+  // 사용자 원래 속눈썹 색에 맞춤: 뿌리 라인 바로 위 띠에서 가장 어두운 픽셀들(자연 속눈썹)의 밝기 vs 레퍼런스 가닥 밝기
   try {
-    const p = add(U.at(0.5), mul(U.up, U.w * 0.35)); const T = c.getTransform();
-    const sx = T.a * p.x + T.c * p.y + T.e, sy = T.b * p.x + T.d * p.y + T.f;
-    const d = c.getImageData(Math.round(sx) - 4, Math.round(sy) - 4, 8, 8).data; let l = 0;
-    for (let i = 0; i < d.length; i += 4) l += 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
-    l /= d.length / 4;
-    const ratio = l / (liveLayer.refBg || 190);
-    const target = Math.max(0.55, Math.min(1.15, Math.pow(ratio, 0.6))); // 완만하게
+    const T = c.getTransform(); const lums = [];
+    for (let t = 0.2; t <= 0.8; t += 0.1) {
+      const p = add(U.at(t), mul(U.up, U.w * 0.04));
+      const sx = T.a * p.x + T.c * p.y + T.e, sy = T.b * p.x + T.d * p.y + T.f;
+      const d = c.getImageData(Math.round(sx) - 3, Math.round(sy) - 3, 6, 6).data;
+      for (let i = 0; i < d.length; i += 4) lums.push(0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2]);
+    }
+    lums.sort((a, b) => a - b); const userLash = lums[Math.floor(lums.length * 0.15)] || 40; // 하위 15% = 속눈썹/라인
+    const ratio = (userLash + 12) / ((liveLayer.refLash || 40) + 12);
+    const target = Math.max(0.6, Math.min(1.4, ratio));
     liveLayer.tone = liveLayer.tone ? liveLayer.tone * 0.8 + target * 0.2 : target;
   } catch (e) { /* 크로스오리진 등 */ }
 }
@@ -674,7 +683,8 @@ function drawPixelEye(c, eye, lm, i, W, H, k) {
     c.closePath(); c.clip();
     c.imageSmoothingEnabled = true; c.imageSmoothingQuality = 'high';
     // 세기: 겹쳐 그리는 횟수 (알파 누적). 조명: 사용자 눈 주변 밝기에 가닥 밝기를 맞춤
-    const passes = Math.max(1, Math.round(state.lashStrength * (U.w / rw < 0.6 ? 1.5 : 1)));
+    const scale = U.w / rw;
+    const passes = Math.max(1, Math.round(state.lashStrength * (scale < 0.45 ? 0.6 : scale < 0.7 ? 0.8 : 1)));
     c.filter = `brightness(${(liveLayer.tone || 1).toFixed(2)})`;
     for (let pIdx = 0; pIdx < passes; pIdx++) {
       c.globalAlpha = pIdx === 0 ? 1 : 0.8;
@@ -834,9 +844,9 @@ function extractRefLashes() {
     const px = rx + i % rw, py = ry + Math.floor(i / rw);
     const { dv, t } = bandOf(px, py);
     let band = 0;
-    if (dv >= -w * 0.02 && dv <= w * 0.65 && t >= -0.35 && t <= 1.45) band = dv > w * 0.55 ? (w * 0.65 - dv) / (w * 0.10) : (dv < w * 0.03 ? (dv + w * 0.02) / (w * 0.05) : 1);
+    if (dv >= w * 0.03 && dv <= w * 0.65 && t >= -0.35 && t <= 1.45) band = dv > w * 0.55 ? (w * 0.65 - dv) / (w * 0.10) : (dv < w * 0.07 ? (dv - w * 0.03) / (w * 0.04) : 1);
     const dark = bg - lum[i];                         // 배경보다 얼마나 어두워졌나
-    let alpha = Math.pow(Math.max(0, Math.min(1, (dark - 18) / 55)), 0.7) * band; // 감마<1: 얇은 가닥이 축소돼도 남게
+    let alpha = Math.max(0, Math.min(1, (dark - 18) / 55)) * band;
     // 피부·아이라인 붉은기 제외: 속눈썹은 무채색~짙은 갈색. 붉고(R-B 큼) 아주 어둡진 않은 픽셀은 피부 그림자
     const rb = d[i*4] - d[i*4+2];
     if (lum[i] > 60) alpha *= 1 - Math.max(0, Math.min(1, (rb - 28) / 35));
@@ -845,6 +855,9 @@ function extractRefLashes() {
     o[i*4] = d[i*4] * 0.85 * (1 - pull) + 30 * pull; o[i*4+1] = d[i*4+1] * 0.85 * (1 - pull) + 20 * pull; o[i*4+2] = d[i*4+2] * 0.85 * (1 - pull) + 18 * pull;
     o[i*4+3] = Math.round(alpha * 255);
   }
+  // 레퍼런스 가닥 밝기: 알파≥0.8 픽셀의 중앙값 (조명 맞춤 기준)
+  const lashL = []; for (let i = 0; i < n; i++) if (o[i*4+3] >= 204) lashL.push(0.299 * o[i*4] + 0.587 * o[i*4+1] + 0.114 * o[i*4+2]);
+  lashL.sort((a, b) => a - b); const refLash = lashL[lashL.length >> 1] || 40;
   if (state.lashThick > 0) { // 굵기: 알파만 max 필터로 확장 (색은 그대로)
     const r = state.lashThick, src = new Uint8ClampedArray(o);
     for (let y = 0; y < rh; y++) for (let x = 0; x < rw; x++) {
@@ -874,7 +887,7 @@ function extractRefLashes() {
   }
   // 앵커: 눈앞, 눈꼬리, 중앙에서 눈 너비만큼 위 (레퍼런스 좌표, 스프라이트는 rx,ry 오프셋)
   const anchors = [inner, outer, add(mid, mul(up, w))];
-  return { sprite, rx, ry, anchors, w, bg, lid: { inner, outer, top, up, root: pick.root ? pick.root.map(p => ({ ...p })) : null }, mirrored: false };
+  return { sprite, rx, ry, anchors, w, bg, refLash, lid: { inner, outer, top, up, root: pick.root ? pick.root.map(p => ({ ...p })) : null }, mirrored: false };
 }
 // 반대쪽 눈용: 스프라이트 좌우 반전 + 앵커도 반전
 function mirrorSprite(L) {
@@ -902,7 +915,7 @@ $('#btnPixel').addEventListener('click', () => {
       { sprite: forImgLeft.sprite, rx: forImgLeft.rx, ry: forImgLeft.ry, src: forImgLeft.anchors, lid: forImgLeft.lid, w: forImgLeft.w, mirrored: forImgLeft.mirrored, openAtCapture: 0.3, smooth: null, pixel: true },
       { sprite: forImgRight.sprite, rx: forImgRight.rx, ry: forImgRight.ry, src: forImgRight.anchors, lid: forImgRight.lid, w: forImgRight.w, mirrored: forImgRight.mirrored, openAtCapture: 0.3, smooth: null, pixel: true },
     ],
-    show: true, run_id: 'pixel-' + Date.now(), before: null, after: null, pixel: true, refBg: one.bg, tone: null,
+    show: true, run_id: 'pixel-' + Date.now(), before: null, after: null, pixel: true, refBg: one.bg, refLash: one.refLash, tone: null,
   };
   $('#btnPixelOff').style.display = ''; $('#btnGenToggle').style.display = 'none';
   if (state.debug) showSprite(liveLayer.eyes[0]);
