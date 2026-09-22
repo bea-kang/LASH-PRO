@@ -618,25 +618,35 @@ function userLid(lm, i, W, H) {
 }
 // 조각 경계: 눈 안쪽은 촘촘히(12), 바깥으로 뻗는 부분은 넓게
 const STRIP_EDGES = [-0.35, -0.18, 0, ...Array.from({ length: 12 }, (_, j) => (j + 1) / 12), 1.2, 1.45];
+// 곡선 위 t에서의 로컬 법선 (globalUp 쪽을 향하게). 눈 바깥(외삽 구간)은 전역 방향과 섞어 과도한 벌어짐 방지
+function localNormal(at, t, globalUp) {
+  const a = at(t - 0.04), b = at(t + 0.04), tan = norm(sub(b, a));
+  let nrm = v2(-tan.y, tan.x);
+  if (nrm.x * globalUp.x + nrm.y * globalUp.y < 0) nrm = mul(nrm, -1);
+  const mix = (t < 0 || t > 1) ? 0.4 : 0.85; // 로컬 비중
+  return norm(add(mul(nrm, mix), mul(globalUp, 1 - mix)));
+}
+const LASH_H = 0.6; // 조각 높이: 뿌리에서 눈 너비의 60%까지
 function drawPixelEye(c, eye, lm, i, W, H, k) {
   const U = userLid(lm, i, W, H), R = eye.lid, rw = eye.w;
   const rootOff = 0.02; // 사용자 라인 바깥으로 2% 띄움
+  const refAt = t => refLidAt(R, t);
   for (let sIdx = 0; sIdx < STRIP_EDGES.length - 1; sIdx++) {
-    const t0 = STRIP_EDGES[sIdx], t1 = STRIP_EDGES[sIdx + 1];
-    // src: 레퍼런스 곡선 위 두 점 + 위 방향. dst: 사용자 폴리라인 위 두 점 + 위 방향(깜빡임 k 반영)
-    const r0 = refLidAt(R, t0), r1 = refLidAt(R, t1);
-    const u0 = add(U.at(t0), mul(U.up, U.w * rootOff)), u1 = add(U.at(t1), mul(U.up, U.w * rootOff));
-    const src = [r0, r1, add(r0, mul(R.up, rw))];
-    const dst = [u0, u1, add(u0, mul(U.up, U.w * k))];
+    const t0 = STRIP_EDGES[sIdx], t1 = STRIP_EDGES[sIdx + 1], tm = (t0 + t1) / 2;
+    const nR = localNormal(refAt, tm, R.up), nU = localNormal(U.at, tm, U.up);
+    const r0 = refAt(t0), r1 = refAt(t1);
+    const u0 = add(U.at(t0), mul(nU, U.w * rootOff)), u1 = add(U.at(t1), mul(nU, U.w * rootOff));
+    const src = [r0, r1, add(r0, mul(nR, rw))];
+    const dst = [u0, u1, add(u0, mul(nU, U.w * k))];
     const M = affineFrom(src, dst); if (!M) continue;
-    // 스트립 클립: 레퍼런스 좌표에서 t0~t1 사이 사각형 (라인 아래 0.1w ~ 위 1.0w). 이웃과 살짝 겹쳐 이음새 감춤
+    // 스트립 클립 (레퍼런스 좌표): 이웃과 살짝 겹쳐 이음새 감춤
     const ov = 0.004;
-    const q0 = refLidAt(R, t0 - ov), q1 = refLidAt(R, t1 + ov);
+    const q0 = refAt(t0 - ov), q1 = refAt(t1 + ov);
     c.save(); c.transform(...M);
     c.beginPath();
-    const lo = -0.12 * rw, hi = 1.0 * rw;
-    c.moveTo(q0.x + R.up.x * lo, q0.y + R.up.y * lo); c.lineTo(q1.x + R.up.x * lo, q1.y + R.up.y * lo);
-    c.lineTo(q1.x + R.up.x * hi, q1.y + R.up.y * hi); c.lineTo(q0.x + R.up.x * hi, q0.y + R.up.y * hi);
+    const lo = -0.06 * rw, hi = LASH_H * rw;
+    c.moveTo(q0.x + nR.x * lo, q0.y + nR.y * lo); c.lineTo(q1.x + nR.x * lo, q1.y + nR.y * lo);
+    c.lineTo(q1.x + nR.x * hi, q1.y + nR.y * hi); c.lineTo(q0.x + nR.x * hi, q0.y + nR.y * hi);
     c.closePath(); c.clip();
     c.drawImage(eye.sprite, eye.rx, eye.ry);
     c.restore();
@@ -646,7 +656,7 @@ function drawPixelEye(c, eye, lm, i, W, H, k) {
     c.strokeStyle = '#2ecc71'; c.beginPath(); U.pts.forEach((p, j) => j ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y)); c.stroke();
     const m = U.at(0.5); c.strokeStyle = '#3aa0ff'; c.beginPath(); c.moveTo(m.x, m.y); c.lineTo(m.x + U.up.x * U.w * k, m.y + U.up.y * U.w * k); c.stroke();
     c.strokeStyle = 'rgba(255,220,0,0.7)'; c.beginPath();
-    for (const t of STRIP_EDGES) { const a = add(U.at(t), mul(U.up, U.w * rootOff)); c.moveTo(a.x, a.y); c.lineTo(a.x + U.up.x * U.w * k, a.y + U.up.y * U.w * k); }
+    for (const t of STRIP_EDGES) { const nU = localNormal(U.at, t, U.up); const a = add(U.at(t), mul(nU, U.w * rootOff)); c.moveTo(a.x, a.y); c.lineTo(a.x + nU.x * U.w * k * LASH_H, a.y + nU.y * U.w * k * LASH_H); }
     c.stroke(); c.restore();
   }
 }
@@ -758,7 +768,7 @@ function extractRefLashes() {
   const lidAt = t => refLidAt({ inner, outer, top, root: pick.root }, t);
   const rx = Math.max(0, Math.floor(Math.min(inner.x, outer.x, top.x) - w * 0.5));
   const rx2 = Math.min(refImg.width, Math.ceil(Math.max(inner.x, outer.x, top.x) + w * 0.5));
-  const ry = Math.max(0, Math.floor(Math.min(inner.y, outer.y, top.y) - w * 0.9));
+  const ry = Math.max(0, Math.floor(Math.min(inner.y, outer.y, top.y) - w * 0.65));
   const ry2 = Math.min(refImg.height, Math.ceil(Math.max(inner.y, outer.y, top.y) + w * 0.5));
   const rw = rx2 - rx, rh = ry2 - ry;
   const src = pctx.getImageData(rx, ry, rw, rh).data; // pickCanvas엔 점이 그려져 있으니 원본에서 다시
@@ -774,7 +784,7 @@ function extractRefLashes() {
     const L = lidAt(Math.max(-0.4, Math.min(1.5, t))); const dv = (p.x - L.x) * up.x + (p.y - L.y) * up.y; // 양수 = 라인 위(속눈썹 쪽)
     return { dv, t };
   };
-  for (let i = 0; i < n; i++) { const { dv, t } = bandOf(rx + i % rw, ry + Math.floor(i / rw)); if (dv > -w * 0.05 && dv < w * 0.8 && t > -0.35 && t < 1.45) inBand.push(lum[i]); }
+  for (let i = 0; i < n; i++) { const { dv, t } = bandOf(rx + i % rw, ry + Math.floor(i / rw)); if (dv > -w * 0.05 && dv < w * 0.55 && t > -0.35 && t < 1.45) inBand.push(lum[i]); }
   inBand.sort((a, b) => a - b); const bg = inBand[Math.floor(inBand.length * 0.7)] || 200;
   const sprite = document.createElement('canvas'); sprite.width = rw; sprite.height = rh;
   const sctx = sprite.getContext('2d'); const out = sctx.createImageData(rw, rh); const o = out.data;
@@ -782,7 +792,7 @@ function extractRefLashes() {
     const px = rx + i % rw, py = ry + Math.floor(i / rw);
     const { dv, t } = bandOf(px, py);
     let band = 0;
-    if (dv >= -w * 0.02 && dv <= w * 0.9 && t >= -0.35 && t <= 1.45) band = dv > w * 0.7 ? (w * 0.9 - dv) / (w * 0.2) : (dv < w * 0.03 ? (dv + w * 0.02) / (w * 0.05) : 1);
+    if (dv >= -w * 0.02 && dv <= w * 0.55 && t >= -0.35 && t <= 1.45) band = dv > w * 0.42 ? (w * 0.55 - dv) / (w * 0.13) : (dv < w * 0.03 ? (dv + w * 0.02) / (w * 0.05) : 1);
     const dark = bg - lum[i];                         // 배경보다 얼마나 어두워졌나
     let alpha = Math.max(0, Math.min(1, (dark - 18) / 55)) * band;
     // 피부·아이라인 붉은기 제외: 속눈썹은 무채색~짙은 갈색. 붉고(R-B 큼) 아주 어둡진 않은 픽셀은 피부 그림자
