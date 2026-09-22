@@ -78,6 +78,11 @@
           <button id="btnPixelOff" style="display:none">떼기</button>
         </div>
         <div class="hint" id="pickStatus">순서: 눈앞(코 쪽 끝) → 눈꼬리(바깥 끝) → 윗눈꺼풀 라인 중앙(속눈썹 뿌리). 확대해서 찍으려면 트랙패드로 핀치.</div>
+        <div class="row"><button id="btnDebug">디버그 보기</button></div>
+        <div id="dbgWrap" style="display:none">
+          <label>떼어낸 속눈썹 (흰 배경 위)</label>
+          <canvas id="dbgSprite" style="width:100%;border-radius:8px;background:#fff"></canvas>
+        </div>
         <label>길이 배율 <output id="scaleOut">1.0</output>×</label>
         <input type="range" id="lashScale" min="0.6" max="2" step="0.05" value="1">
       </div>
@@ -185,7 +190,7 @@ const VOLUME = { natural: [40, 1], volume: [42, 2], mega: [44, 3] };
 const state = {
   zones: [...PRESETS.natural], curl: 'C', volume: 'natural',
   opacity: 0.85, show: true, mirror: true, mode: null, // 'video' | 'image'
-  texture: 'even', zoom: true, engine: 'openai', lashScale: 1,
+  texture: 'even', zoom: true, engine: 'openai', lashScale: 1, debug: false,
 };
 // 눈 확대 보기: 프레임 간 부드럽게 따라가는 뷰 상태
 const view = { cx: 0, cy: 0, z: 1, init: false };
@@ -636,6 +641,14 @@ function drawPixelEye(c, eye, lm, i, W, H, k) {
     c.drawImage(eye.sprite, eye.rx, eye.ry);
     c.restore();
   }
+  if (state.debug) { // 사용자 뿌리 라인(초록) + 위 방향(파랑) + 조각 경계(노랑)
+    c.save(); c.lineWidth = 1.5;
+    c.strokeStyle = '#2ecc71'; c.beginPath(); U.pts.forEach((p, j) => j ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y)); c.stroke();
+    const m = U.at(0.5); c.strokeStyle = '#3aa0ff'; c.beginPath(); c.moveTo(m.x, m.y); c.lineTo(m.x + U.up.x * U.w * k, m.y + U.up.y * U.w * k); c.stroke();
+    c.strokeStyle = 'rgba(255,220,0,0.7)'; c.beginPath();
+    for (const t of STRIP_EDGES) { const a = add(U.at(t), mul(U.up, U.w * rootOff)); c.moveTo(a.x, a.y); c.lineTo(a.x + U.up.x * U.w * k, a.y + U.up.y * U.w * k); }
+    c.stroke(); c.restore();
+  }
 }
 function drawLiveLayer(c, lm, W, H, smooth = true) {
   liveLayer.eyes.forEach((eye, i) => {
@@ -717,6 +730,20 @@ pickCanvas.addEventListener('pointermove', e => {
 });
 pickCanvas.addEventListener('pointerup', () => { dragging = null; });
 $('#pickReset').addEventListener('click', () => { pick.pts = []; pick.root = null; pick.auto = false; drawPick(); });
+$('#btnDebug').addEventListener('click', e => {
+  state.debug = !state.debug; e.target.textContent = state.debug ? '디버그 끄기' : '디버그 보기';
+  $('#dbgWrap').style.display = state.debug ? '' : 'none';
+  if (state.debug && liveLayer?.pixel) showSprite(liveLayer.eyes[0]);
+});
+function showSprite(eye) {
+  const c = $('#dbgSprite'); c.width = eye.sprite.width; c.height = eye.sprite.height;
+  const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height); x.drawImage(eye.sprite, 0, 0);
+  // 기준선: 뿌리 곡선(노랑), 위 방향(초록)
+  const R = eye.lid, w = eye.w;
+  x.strokeStyle = '#e6b800'; x.lineWidth = 2; x.beginPath();
+  for (let t = -0.35; t <= 1.45; t += 0.05) { const q = refLidAt(R, t); t <= -0.35 ? x.moveTo(q.x - eye.rx, q.y - eye.ry) : x.lineTo(q.x - eye.rx, q.y - eye.ry); } x.stroke();
+  const m = refLidAt(R, 0.5); x.strokeStyle = '#2ecc71'; x.beginPath(); x.moveTo(m.x - eye.rx, m.y - eye.ry); x.lineTo(m.x - eye.rx + R.up.x * w * 0.5, m.y - eye.ry + R.up.y * w * 0.5); x.stroke();
+}
 $('#lashScale').addEventListener('input', e => { state.lashScale = +e.target.value; $('#scaleOut').textContent = (+e.target.value).toFixed(2); });
 
 // 레퍼런스에서 윗눈꺼풀 띠 안의 어두운 가닥만 알파로 떼어낸 스프라이트 (한쪽 눈)
@@ -755,7 +782,7 @@ function extractRefLashes() {
     const px = rx + i % rw, py = ry + Math.floor(i / rw);
     const { dv, t } = bandOf(px, py);
     let band = 0;
-    if (dv >= -w * 0.06 && dv <= w * 0.9 && t >= -0.35 && t <= 1.45) band = dv > w * 0.7 ? (w * 0.9 - dv) / (w * 0.2) : 1;
+    if (dv >= -w * 0.02 && dv <= w * 0.9 && t >= -0.35 && t <= 1.45) band = dv > w * 0.7 ? (w * 0.9 - dv) / (w * 0.2) : (dv < w * 0.03 ? (dv + w * 0.02) / (w * 0.05) : 1);
     const dark = bg - lum[i];                         // 배경보다 얼마나 어두운가
     const alpha = Math.max(0, Math.min(1, (dark - 18) / 55)) * band;
     o[i*4] = d[i*4]; o[i*4+1] = d[i*4+1]; o[i*4+2] = d[i*4+2]; o[i*4+3] = Math.round(alpha * 255);
@@ -794,6 +821,7 @@ $('#btnPixel').addEventListener('click', () => {
     show: true, run_id: 'pixel-' + Date.now(), before: null, after: null, pixel: true,
   };
   $('#btnPixelOff').style.display = ''; $('#btnGenToggle').style.display = 'none';
+  if (state.debug) showSprite(liveLayer.eyes[0]);
   $('#pickStatus').className = 'hint ok'; $('#pickStatus').textContent = '붙였어요. 라이브에서 움직여 보세요. 길이는 레퍼런스 눈 너비 대비 비율로 맞춰져요.';
   if (state.mode === 'video') { lastVideoTime = -1; requestAnimationFrame(loop); }
 });
