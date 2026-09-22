@@ -130,7 +130,7 @@
       <div id="cmpWrap" style="display:none">
         <label>전 ← → 후</label>
         <input type="range" id="cmp" min="0" max="100" value="50">
-        <div class="row"><button class="primary" id="btnSaveResult">결과 사진 저장</button></div>
+        <div class="row"><button class="primary" id="btnSaveResult">결과 사진 저장</button><button id="btnFull">전체 보기</button></div>
       </div>
       <div id="fbWrap" style="display:none">
         <div class="fb">
@@ -1112,8 +1112,8 @@ function snapshot() {
   before.getContext('2d').drawImage(lastSrc, 0, 0, W, H);
   return { before, lm, W, H };
 }
-function showResult(before, after, run_id, msg) {
-  result = { before, after, run_id };
+function showResult(before, after, run_id, msg, crop) {
+  result = { before, after, run_id, crop, full: false };
   fb.me = null; fb.ref = null; setSeg('#fbMe', ''); setSeg('#fbRef', ''); $('#fbNote').value = ''; $('#fbStatus').textContent = '';
   $('#cmpWrap').style.display = ''; $('#fbWrap').style.display = ''; $('#btnBack').style.display = '';
   const st = $('#tryonStatus'); st.className = 'hint ok'; st.textContent = msg;
@@ -1127,7 +1127,7 @@ $('#btnTryon').addEventListener('click', async () => {
   const t0 = performance.now();
   try {
     const r = await runTryon(state.guided, snap);
-    showResult(snap.before, r.after, r.run_id, `완료 (${r.guided ? '겹친 화면 사실화' : '맨 눈 합성'}) · ${((performance.now() - t0) / 1000).toFixed(1)}초 · 슬라이더로 전/후 비교. 실제 시술 결과와 다를 수 있어요.`);
+    showResult(snap.before, r.after, r.run_id, `완료 (${r.guided ? '겹친 화면 사실화' : '맨 눈 합성'}) · ${((performance.now() - t0) / 1000).toFixed(1)}초 · 슬라이더로 전/후 비교. 실제 시술 결과와 다를 수 있어요.`, r.crop);
   } catch (err) {
     st.className = 'hint err'; st.textContent = '실패: ' + err.message;
   } finally { updateTryonBtn(); }
@@ -1164,11 +1164,12 @@ async function pickAB(which) {
   $('#abStatus').textContent = `${which} 선택 · 기록됨. 아래에서 ${which} 결과를 전/후로 보고 점수를 남길 수 있어요.`;
   fetch('/api/feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: win.run_id, note: `AB 비교에서 선택됨 (vs ${lose.run_id})` }) }).catch(() => {});
   fetch('/api/feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: lose.run_id, note: `AB 비교에서 탈락 (vs ${win.run_id})` }) }).catch(() => {});
-  showResult(ab.before, win.after, win.run_id, `${which} 결과 · 전/후 비교`);
+  showResult(ab.before, win.after, win.run_id, `${which} 결과 · 전/후 비교`, win.crop);
 }
 $('#pickA').addEventListener('click', () => pickAB('A'));
 $('#pickB').addEventListener('click', () => pickAB('B'));
 $('#cmp').addEventListener('input', drawResult);
+$('#btnFull').addEventListener('click', e => { if (!result) return; result.full = !result.full; e.target.textContent = result.full ? '눈 확대' : '전체 보기'; drawResult(); });
 $('#btnSaveResult').addEventListener('click', () => {
   if (!result) return;
   // 거울 반전 상태 그대로 저장 (본인이 보는 모습)
@@ -1202,23 +1203,30 @@ $('#btnBack').addEventListener('click', () => {
 });
 function drawResult() {
   if (!result) return;
-  const { before, after } = result, W = before.width, H = before.height;
+  const { before, after, crop } = result, W = before.width, H = before.height;
   if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
   const split = (+$('#cmp').value / 100);
   ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, W, H);
   if (state.mirror) { ctx.translate(W, 0); ctx.scale(-1, 1); }
-  // 확대 뷰 유지
-  if (state.zoom && view.init) { ctx.translate(W / 2, H / 2); ctx.scale(view.z, view.z); ctx.translate(-view.cx, -view.cy); }
+  // 합성된 영역(눈 주변 크롭)을 캔버스에 꽉 채움. 전체 보기면 그대로
+  if (crop && !result.full) {
+    const pad = crop.cw * 0.08;
+    const rx = Math.max(0, crop.x0 - pad), ry = Math.max(0, crop.y0 - pad);
+    const rw = Math.min(W - rx, crop.cw + pad * 2), rh = Math.min(H - ry, crop.ch + pad * 2);
+    const z = Math.min(W / rw, H / rh);
+    ctx.translate(W / 2, H / 2); ctx.scale(z, z); ctx.translate(-(rx + rw / 2), -(ry + rh / 2));
+  }
   ctx.drawImage(after, 0, 0);
   // 왼쪽(화면 기준) = 전, 오른쪽 = 후. 거울 반전이면 좌표계도 뒤집혀 있으니 소스 좌표로 환산
   const sx = state.mirror ? W * (1 - split) : W * split;
   ctx.save(); ctx.beginPath();
   if (state.mirror) ctx.rect(sx, -H, W - sx, H * 3); else ctx.rect(-W, -H, sx + W, H * 3);
   ctx.clip(); ctx.drawImage(before, 0, 0); ctx.restore();
-  ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 2 / (state.zoom && view.init ? view.z : 1);
+  const T = ctx.getTransform(); const zs = Math.hypot(T.a, T.b) || 1;
+  ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 2 / zs;
   ctx.beginPath(); ctx.moveTo(sx, -H); ctx.lineTo(sx, H * 2); ctx.stroke();
   ctx.restore();
-  stats.textContent = '정밀 합성 결과 · 전/후 비교';
+  stats.textContent = '결과 · 전/후 비교' + (crop ? (result.full ? ' · 전체' : ' · 눈 확대') : '');
 }
 </script>
 </body>
