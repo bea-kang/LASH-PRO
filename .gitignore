@@ -2,3 +2,4 @@
 node_modules/
 .DS_Store
 spikes/a-live-ar/runs/
+spikes/a-live-ar/.cert/

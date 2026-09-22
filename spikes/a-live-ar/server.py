@@ -6,6 +6,7 @@ Keys: 같은 폴더의 .env (gitignore됨). OPENAI_API_KEY 하나로 다 됨. GE
 import base64
 import json
 import os
+import ssl
 import sys
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -372,5 +373,12 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8787
-    print(f"spike A/B on http://localhost:{port}  (openai key: {'yes' if os.environ.get('OPENAI_API_KEY') else 'NO'} [vision {OPENAI_VISION_MODEL}, points {OPENAI_POINTS_MODEL}/{OPENAI_POINTS_EFFORT}], gemini: {'yes' if os.environ.get('GEMINI_API_KEY') else 'NO'} [{GEMINI_IMAGE_MODEL}], openai: {'yes' if os.environ.get('OPENAI_API_KEY') else 'NO'} [{OPENAI_IMAGE_MODEL}])", flush=True)
-    ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    # --https: 폰 테스트용 (카메라는 https에서만 켜짐). .cert/ 의 자체서명 인증서 사용, 폰에서 경고 → "계속" 필요
+    https = "--https" in sys.argv
+    srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    if https:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(os.path.join(HERE, ".cert", "cert.pem"), os.path.join(HERE, ".cert", "key.pem"))
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    print(f"spike A/B on {'https' if https else 'http'}://localhost:{port}  (openai key: {'yes' if os.environ.get('OPENAI_API_KEY') else 'NO'} [vision {OPENAI_VISION_MODEL}, points {OPENAI_POINTS_MODEL}/{OPENAI_POINTS_EFFORT}], gemini: {'yes' if os.environ.get('GEMINI_API_KEY') else 'NO'} [{GEMINI_IMAGE_MODEL}], openai: {'yes' if os.environ.get('OPENAI_API_KEY') else 'NO'} [{OPENAI_IMAGE_MODEL}])", flush=True)
+    srv.serve_forever()
