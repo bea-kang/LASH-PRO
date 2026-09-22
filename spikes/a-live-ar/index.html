@@ -326,6 +326,7 @@ let lastLm = null, lastSrc = null, lastW = 0, lastH = 0;   // 캡처용 최근 �
 let refDataUrl = null;                                     // 레퍼런스 원본(축소본)
 let result = null;                                         // {before: canvas, after: canvas, run_id}
 let lastMap = null;                                        // 마지막 번역 결과(사양) — 합성 프롬프트에 같이 보냄
+let lastGeom = null;                                       // 레퍼런스 실측 기하 {tipRatio, spikes}
 let liveLayer = null;                                      // 생성 결과에서 떼어낸 속눈썹 레이어 {eyes:[{sprite,rx,ry,src}], show, run_id, before, after}
 let refImg = null;                                         // 레퍼런스 원본 Image
 const pick = { pts: [] };                                  // 레퍼런스 위 3점 (레퍼런스 픽셀 좌표)
@@ -1042,6 +1043,13 @@ $('#btnPixel').addEventListener('click', () => {
   }
   const one = extractRefLashes(), two = mirrorSprite(one);
   const profile = analyzeStrands(one);
+  // 레퍼런스 실측 기하 → 캡처 프롬프트용 (추정 mm 대신)
+  const inEye = profile.filter(p => p.t >= 0 && p.t <= 1);
+  const lens = inEye.map(p => p.len).sort((a, b) => b - a);
+  const tipRatio = lens.length ? +(lens.slice(0, Math.max(1, Math.floor(lens.length * 0.1))).reduce((a, b) => a + b, 0) / Math.max(1, Math.floor(lens.length * 0.1))).toFixed(2) : null; // 상위 10% 평균
+  let spikes = 0, lastT = -1;
+  for (let j = 1; j < inEye.length - 1; j++) if (inEye[j].len > inEye[j-1].len && inEye[j].len >= inEye[j+1].len && inEye[j].len > 0.25 && inEye[j].t - lastT > 0.06) { spikes++; lastT = inEye[j].t; }
+  lastGeom = { tipRatio, spikes };
   // 레퍼런스가 이미지상 왼쪽 눈인지 오른쪽 눈인지: 눈앞이 눈꼬리보다 오른쪽이면 이미지 왼쪽 눈(피사체 오른눈)
   const [inner, outer] = pick.pts;
   const refIsImgLeft = inner.x > outer.x;
@@ -1094,7 +1102,7 @@ async function runTryon(guided, snap) {
   const crop = document.createElement('canvas'); crop.width = OUT_W; crop.height = OUT_H;
   crop.getContext('2d').drawImage(input, x0, y0, cw, ch, 0, 0, OUT_W, OUT_H);
   const r = await fetch('/api/tryon', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ frame: crop.toDataURL('image/jpeg', 0.92), reference: referenceEyeCrop(), engine: state.engine, lashmap: lastMap, guided: guidedOn }) });
+    body: JSON.stringify({ frame: crop.toDataURL('image/jpeg', 0.92), reference: referenceEyeCrop(), engine: state.engine, lashmap: lastMap, geom: lastGeom, guided: guidedOn }) });
   const m = await r.json();
   if (!r.ok) throw new Error(m.error || r.status);
   const img = new Image(); img.src = m.image; await img.decode();
@@ -1125,7 +1133,8 @@ $('#btnTryon').addEventListener('click', async () => {
   const st = $('#tryonStatus');
   if (!lastLm || !lastSrc || !refDataUrl) return;
   const snap = snapshot();
-  $('#btnTryon').disabled = true; $('#btnCompare').disabled = true; st.className = 'hint'; st.textContent = '만드는 중… (20~50초)';
+  $('#btnTryon').disabled = true; $('#btnCompare').disabled = true; st.className = 'hint';
+  st.textContent = (state.guided && liveLayer?.pixel && liveLayer.show ? '라이브 속눈썹 위치를 기준으로 ' : '맨 눈에서 ') + '만드는 중… (20~70초)';
   const t0 = performance.now();
   try {
     const r = await runTryon(state.guided, snap);

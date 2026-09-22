@@ -54,6 +54,8 @@ LASHMAP_SCHEMA = {
         "volume": {"type": "string", "enum": ["natural", "volume", "mega"]},
         "style": {"type": "string", "enum": ["natural", "cat", "doll"]},
         "texture": {"type": "string", "enum": ["even", "wispy"]},
+        "lower_lashes": {"type": "boolean"},
+        "drama": {"type": "integer", "enum": [1, 2, 3, 4, 5]},
         # 레퍼런스 눈 기준점 (이미지 폭·높이 대비 0~1). 눈이 여러 개면 가장 크고 선명한 눈 하나
         "inner_corner_x": {"type": "number"}, "inner_corner_y": {"type": "number"},
         "outer_corner_x": {"type": "number"}, "outer_corner_y": {"type": "number"},
@@ -61,7 +63,7 @@ LASHMAP_SCHEMA = {
         "confidence": {"type": "number"},
         "notes": {"type": "string"},
     },
-    "required": ["is_lash_photo", "curl", "len_inner_mm", "len_inner_mid_mm", "len_center_mm", "len_outer_mid_mm", "len_outer_mm", "volume", "style", "texture", "inner_corner_x", "inner_corner_y", "outer_corner_x", "outer_corner_y", "lash_root_center_x", "lash_root_center_y", "confidence", "notes"],
+    "required": ["is_lash_photo", "curl", "len_inner_mm", "len_inner_mid_mm", "len_center_mm", "len_outer_mid_mm", "len_outer_mm", "volume", "style", "texture", "lower_lashes", "drama", "inner_corner_x", "inner_corner_y", "outer_corner_x", "outer_corner_y", "lash_root_center_x", "lash_root_center_y", "confidence", "notes"],
     "additionalProperties": False,
 }
 
@@ -72,6 +74,8 @@ PROMPT = """이 사진은 속눈썹 연장 샵의 시술 결과 레퍼런스입�
 - volume: natural(1:1 클래식, 성근 느낌) / volume(2~4D, 촘촘) / mega(5D 이상, 매우 빽빽)
 - style: natural(균일) / cat(눈꼬리로 갈수록 길어짐) / doll(중앙이 가장 김)
 - texture: even(길이가 고르게 정렬된 클래식/볼륨) / wispy(몇 가닥씩 뾰족하게 모여 스파이크를 이루는 요정·위스피 스타일. 긴 스파이크와 짧은 베이스가 번갈아 보임)
+- lower_lashes: 아래 속눈썹에도 연장/스파이크가 있으면 true.
+- drama: 과감도 1(아주 자연스러움)~5(매우 과감, 길고 빽빽). 샵 레퍼런스는 대개 3~5. 실제보다 낮게 읽는 경향이 있으니 보이는 그대로.
 - inner_corner / outer_corner / lash_root_center: 사진에서 가장 크고 선명한 눈 하나의 기준점. 이미지 폭·높이 대비 0~1 좌표. inner_corner는 코 쪽 눈구석(눈물점), outer_corner는 바깥 눈꼬리 끝, lash_root_center는 윗눈꺼풀 속눈썹 뿌리 라인의 한가운데(눈동자 위쪽 라인). 눈이 감겨 있어도 라인 기준으로.
 - confidence: 0~1. 사진이 눈을 감고 있거나 접사라 열린 눈 상태를 추정해야 하면 낮게.
 - notes: 한 줄. 특징(예: "눈꼬리 3구간만 길게, 컬러 브라운") 또는 추정 근거.
@@ -160,21 +164,43 @@ def eyepoints(image_b64: str, media_type: str) -> dict:
     return json.loads(msg["content"])
 
 
-TRYON_PROMPT = """Image 1 is a close-up photo of a person's eyes. Image 2 is a reference photo of eyelash extensions done at a lash salon.
-Edit image 1 so the person is wearing eyelash extensions that COPY image 2's lashes: the same curl, the same lengths per zone (inner corner to outer corner), the same density, the same spiky/wispy or even pattern, the same lash color.
-Do not reinterpret, stylize, or "improve" the design. Do not make the lashes longer, thicker, or more dramatic than image 2. If image 2 has a few spikes, make the same number of spikes in the same places along the lid.
-Keep everything else in image 1 exactly as it is: eye shape and size, eyelids, skin texture, iris, eyebrows, lighting, framing, resolution. Do not enlarge the eyes, do not retouch the skin, do not add eyeliner or other makeup, do not change the face.
-Return only the edited version of image 1, same size and framing."""
+STYLE_LINE = {"natural": "even length across the lid", "cat": "cat-eye: longest toward the outer corner, sweeping outward", "doll": "doll-eye: longest at the center of the lid"}
+TEX_LINE = {"even": "evenly aligned tips (classic/volume set)", "wispy": "wispy: distinct pointed clusters (spikes) with shorter lashes between them"}
+CURL_LINE = {"J": "J curl (nearly straight, slight lift)", "C": "C curl, lifted upward", "D": "D curl, strongly curled up toward the lid"}
 
-GUIDED_PROMPT = """Image 1 is a close-up photo of a person's eyes with a ROUGH OVERLAY of eyelash extensions already drawn in place (dark strands on the upper lash line). Image 2 is the salon reference photo of the same lash design.
-Turn image 1 into a photorealistic photo of this person actually wearing these eyelash extensions. The overlay already has the correct placement, lengths per zone, spike pattern and curl — keep those exactly where they are; do not lengthen, thicken, move or restyle them. Replace the flat drawn strands with realistic individual lashes that match image 2's texture, sheen and color, blended into the person's own lashes, lid and lighting.
-Keep everything else in image 1 exactly as it is: eye shape and size, eyelids, skin texture, iris, eyebrows, lighting, framing, resolution. No skin retouching, no eyeliner, no other makeup, no face changes.
-Return only the edited version of image 1, same size and framing."""
 
-CURL_DESC = {"J": "J curl (nearly straight, slight lift)", "C": "C curl (standard lift)", "D": "D curl (strong lift, curls up toward the lid)"}
-VOL_DESC = {"natural": "classic 1:1, sparse", "volume": "2D-4D volume, dense", "mega": "mega volume 5D+, very dense"}
-STYLE_DESC = {"natural": "even length across the lid", "cat": "cat-eye: longer toward the outer corner", "doll": "doll-eye: longest at the center"}
-TEX_DESC = {"even": "evenly aligned tips", "wispy": "wispy: clusters gathered into pointed spikes with shorter lashes between them"}
+def build_prompt(m, geom, guided):
+    """레퍼런스 충실도 프롬프트. 2026-09-22 비교: 추정 mm 사양은 결과를 얌전하게 만들어 뺌. 실측 기하(픽셀)만 숫자로 넣음."""
+    m = m or {}; geom = geom or {}
+    lines = []
+    if guided:
+        lines.append("Image 1 is a close-up photo of a person's eyes with a ROUGH OVERLAY of the eyelash extensions already drawn in place (dark strands on the upper lash line). Image 2 is the salon reference photo of the same lash design.")
+        lines.append("Turn image 1 into a photorealistic photo of this person actually wearing these eyelash extensions. The overlay marks the correct placement, lengths and spike positions — keep them there; replace the flat drawn strands with realistic individual lashes matching image 2's texture, sheen and color.")
+    else:
+        lines.append("Image 1 is a close-up photo of a person's eyes. Image 2 is a salon reference photo of eyelash extensions.")
+        lines.append("Put the EXACT lash design from image 2 onto the person in image 1.")
+    drama = m.get("drama")
+    if drama and drama >= 3:
+        lines.append("Match image 2's boldness: this design is dramatic, not natural — reproduce it at the same intensity relative to the eye. Do NOT tone it down, shorten it, or make it 'natural'.")
+    else:
+        lines.append("Match image 2's intensity exactly — neither bolder nor more natural than the reference.")
+    lines.append("Copy these from image 2 precisely:")
+    tip = geom.get("tipRatio")
+    if tip:
+        lines.append(f"- Length: the longest lashes reach about {int(round(tip * 100))}% of the eye's width above the lash line (measured on image 2). Keep that proportion on image 1's eyes.")
+    spikes = geom.get("spikes")
+    if m.get("texture") == "wispy":
+        lines.append(f"- Spikes: {TEX_LINE['wispy']}" + (f", about {spikes} spikes per upper lid" if spikes else "") + ".")
+    else:
+        lines.append(f"- Tips: {TEX_LINE.get(m.get('texture'), 'as in image 2')}.")
+    lines.append(f"- Shape: {STYLE_LINE.get(m.get('style'), 'as in image 2')}.")
+    lines.append("- Density: full and dark along the whole upper lash line, from inner corner to outer corner, as dense as image 2.")
+    if m.get("lower_lashes"):
+        lines.append("- Lower lashes: image 2 also has short wispy spikes on the lower lash line — add them too.")
+    lines.append(f"- Curl: {CURL_LINE.get(m.get('curl'), 'as in image 2')}. Color: black.")
+    lines.append("Do not reinterpret the style. Keep everything else in image 1 exactly as it is: eye shape and size, eyelids, skin, iris, eyebrows, lighting, framing. No skin retouching, no eyeliner, no other makeup, no face changes.")
+    lines.append("Return only the edited version of image 1, same size and framing.")
+    return "\n".join(lines)
 
 
 def spec_text(m: dict) -> str:
@@ -198,7 +224,7 @@ def split_data_url(data_url: str):
     return header[5:].split(";")[0], b64
 
 
-def gemini_tryon(frame_b64: str, frame_mime: str, ref_b64: str, ref_mime: str, prompt: str) -> tuple[str, str]:
+def gemini_tryon(frame_b64, frame_mime, ref_b64, ref_mime, prompt):
     """Returns (mime_type, base64) of the edited image."""
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
@@ -236,7 +262,7 @@ def gemini_tryon(frame_b64: str, frame_mime: str, ref_b64: str, ref_mime: str, p
     raise RuntimeError("이미지가 안 돌아왔어요: " + (" ".join(texts)[:300] or json.dumps(resp)[:300]))
 
 
-def openai_tryon(frame_b64: str, frame_mime: str, ref_b64: str, ref_mime: str, prompt: str) -> tuple[str, str]:
+def openai_tryon(frame_b64, frame_mime, ref_b64, ref_mime, prompt):
     """OpenAI Images edit: image[] 여러 장 + prompt. input_fidelity=high 로 얼굴 보존."""
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
@@ -328,7 +354,7 @@ class Handler(SimpleHTTPRequestHandler):
             engine = req.get("engine", "gemini")
             if engine not in ENGINES:
                 return self._json(400, {"error": f"unknown engine {engine}"})
-            prompt = (GUIDED_PROMPT if req.get("guided") else TRYON_PROMPT) + spec_text(req.get("lashmap"))
+            prompt = build_prompt(req.get("lashmap"), req.get("geom"), bool(req.get("guided")))
             t0 = time.time()
             mime, b64 = ENGINES[engine](fb, fm, rb, rm, prompt)
             run_id = time.strftime("%Y%m%d-%H%M%S")
@@ -338,7 +364,7 @@ class Handler(SimpleHTTPRequestHandler):
                 with open(os.path.join(d, name + "." + mt.split("/")[-1].replace("jpeg", "jpg")), "wb") as f:
                     f.write(base64.b64decode(data))
             meta = {"run_id": run_id, "engine": engine, "guided": bool(req.get("guided")), "model": OPENAI_IMAGE_MODEL if engine == "openai" else GEMINI_IMAGE_MODEL,
-                    "seconds": round(time.time() - t0, 1), "lashmap": req.get("lashmap"), "prompt": prompt}
+                    "seconds": round(time.time() - t0, 1), "lashmap": req.get("lashmap"), "geom": req.get("geom"), "prompt": prompt}
             with open(os.path.join(d, "meta.json"), "w") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=1)
             sys.stderr.write("tryon[%s] %s: ok %s %d bytes %.1fs\n" % (engine, run_id, mime, len(b64), meta["seconds"]))
