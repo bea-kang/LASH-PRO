@@ -658,8 +658,17 @@ function drawPixelEye(c, eye, lm, i, W, H, k) {
     if (U.w / rw < 0.6) c.drawImage(eye.sprite, eye.rx, eye.ry); // 많이 축소될 땐 두 번 겹쳐 얇은 가닥 보강
     c.restore();
   }
-  if (state.debug) { // 사용자 뿌리 라인(초록) + 위 방향(파랑) + 조각 경계(노랑)
+  if (state.debug) { // 사용자 뿌리 라인(초록) + 위 방향(파랑) + 조각 경계(노랑) + 눈앞(분홍)/눈꼬리(파랑 점)
     c.save(); c.lineWidth = 1.5;
+    const pin = U.at(0), pout = U.at(1), rr = Math.max(3, U.w * 0.05);
+    c.fillStyle = '#ff5c8a'; c.beginPath(); c.arc(pin.x, pin.y, rr, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#5cc8ff'; c.beginPath(); c.arc(pout.x, pout.y, rr, 0, Math.PI * 2); c.fill();
+    // 이 눈에 쓰인 레퍼런스: 반전 여부 + 레퍼런스 눈앞/눈꼬리를 조각 변환으로 옮겨 찍음 (초록 테두리)
+    const M0 = affineFrom([refAt(0), refAt(1), add(refAt(0), mul(localNormal(refAt, 0.5, R.up), rw))], [U.at(0), U.at(1), add(U.at(0), mul(localNormal(U.at, 0.5, U.up), U.w))]);
+    if (M0) { const tp = p => v2(M0[0] * p.x + M0[2] * p.y + M0[4], M0[1] * p.x + M0[3] * p.y + M0[5]);
+      const ri = tp(R.inner), ro = tp(R.outer); c.strokeStyle = '#2ecc71'; c.lineWidth = 2;
+      c.beginPath(); c.arc(ri.x, ri.y, rr * 1.6, 0, Math.PI * 2); c.stroke(); c.beginPath(); c.arc(ro.x, ro.y, rr * 1.6, 0, Math.PI * 2); c.stroke();
+      c.fillStyle = '#fff'; c.font = `${Math.round(rr * 2.5)}px sans-serif`; c.fillText((eye.mirrored ? 'M' : 'O') + ' in', ri.x + rr, ri.y - rr); c.fillText('out', ro.x + rr, ro.y - rr); }
     c.strokeStyle = '#2ecc71'; c.beginPath(); U.pts.forEach((p, j) => j ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y)); c.stroke();
     const m = U.at(0.5); c.strokeStyle = '#3aa0ff'; c.beginPath(); c.moveTo(m.x, m.y); c.lineTo(m.x + U.up.x * U.w * k, m.y + U.up.y * U.w * k); c.stroke();
     c.strokeStyle = 'rgba(255,220,0,0.7)'; c.beginPath();
@@ -849,8 +858,8 @@ $('#btnPixel').addEventListener('click', () => {
   const forImgLeft = refIsImgLeft ? one : two, forImgRight = refIsImgLeft ? two : one;
   liveLayer = {
     eyes: [
-      { sprite: forImgLeft.sprite, rx: forImgLeft.rx, ry: forImgLeft.ry, src: forImgLeft.anchors, lid: forImgLeft.lid, w: forImgLeft.w, openAtCapture: 0.3, smooth: null, pixel: true },
-      { sprite: forImgRight.sprite, rx: forImgRight.rx, ry: forImgRight.ry, src: forImgRight.anchors, lid: forImgRight.lid, w: forImgRight.w, openAtCapture: 0.3, smooth: null, pixel: true },
+      { sprite: forImgLeft.sprite, rx: forImgLeft.rx, ry: forImgLeft.ry, src: forImgLeft.anchors, lid: forImgLeft.lid, w: forImgLeft.w, mirrored: forImgLeft.mirrored, openAtCapture: 0.3, smooth: null, pixel: true },
+      { sprite: forImgRight.sprite, rx: forImgRight.rx, ry: forImgRight.ry, src: forImgRight.anchors, lid: forImgRight.lid, w: forImgRight.w, mirrored: forImgRight.mirrored, openAtCapture: 0.3, smooth: null, pixel: true },
     ],
     show: true, run_id: 'pixel-' + Date.now(), before: null, after: null, pixel: true,
   };
