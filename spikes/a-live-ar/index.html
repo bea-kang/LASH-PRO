@@ -78,6 +78,11 @@
           <button id="btnPixelOff" style="display:none">떼기</button>
         </div>
         <div class="hint" id="pickStatus">순서: 눈앞(코 쪽 끝) → 눈꼬리(바깥 끝) → 윗눈꺼풀 라인 중앙(속눈썹 뿌리). 확대해서 찍으려면 트랙패드로 핀치.</div>
+        <label>붙이는 방식</label>
+        <div class="seg" id="renderMode">
+          <button data-v="pixel" class="on">C · 사진 픽셀 그대로</button>
+          <button data-v="strands">D · 가닥 구조 추출해 새로 그림</button>
+        </div>
         <div class="row"><button id="btnDebug">디버그 보기</button></div>
         <div id="dbgWrap" style="display:none">
           <label>떼어낸 속눈썹 (흰 배경 위)</label>
@@ -194,7 +199,7 @@ const VOLUME = { natural: [40, 1], volume: [42, 2], mega: [44, 3] };
 const state = {
   zones: [...PRESETS.natural], curl: 'C', volume: 'natural',
   opacity: 0.85, show: true, mirror: true, mode: null, // 'video' | 'image'
-  texture: 'even', zoom: true, engine: 'openai', lashScale: 1, lashStrength: 1.5, lashThick: 0, debug: false,
+  texture: 'even', zoom: true, engine: 'openai', lashScale: 1, lashStrength: 1.5, lashThick: 0, debug: false, renderMode: 'pixel',
 };
 // 눈 확대 보기: 프레임 간 부드럽게 따라가는 뷰 상태
 const view = { cx: 0, cy: 0, z: 1, init: false };
@@ -227,6 +232,7 @@ seg('#curl', v => { state.curl = v; });
 seg('#volume', v => { state.volume = v; strands = null; });
 seg('#texture', v => { state.texture = v; strands = null; });
 seg('#engine', v => { state.engine = v; });
+seg('#renderMode', v => { state.renderMode = v; });
 $('#opacity').addEventListener('input', e => { state.opacity = +e.target.value; $('#opOut').textContent = e.target.value; });
 $('#btnToggle').addEventListener('click', e => { state.show = !state.show; e.target.textContent = state.show ? '속눈썹 끄기' : '속눈썹 켜기'; });
 $('#btnMirror').addEventListener('click', () => { state.mirror = !state.mirror; });
@@ -497,7 +503,7 @@ function drawFrame(src, W, H, lm) {
   if (lm && liveLayer && liveLayer.show) {
     drawLiveLayer(ctx, lm, W, H);
     const ew = len(sub(v2(lm[33].x * W, lm[33].y * H), v2(lm[133].x * W, lm[133].y * H)));
-    if (ew < 140) { // 눈이 작으면 어떤 방식이든 가닥이 뭉개짐 → 가까이 오라고 안내
+    if (ew < 110) { // 눈이 작으면 어떤 방식이든 가닥이 뭉개짐 → 가까이 오라고 안내
       ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.font = `${Math.round(H / 22)}px sans-serif`; ctx.textAlign = 'center';
       ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, H * 0.06, W, H / 12);
       ctx.fillStyle = '#fff'; ctx.fillText('카메라에 더 가까이 오세요 (눈이 화면 폭의 1/4 이상)', W / 2, H * 0.06 + H / 16); ctx.restore();
@@ -718,7 +724,8 @@ function drawLiveLayer(c, lm, W, H, smooth = true) {
       eye.openRef = Math.max((eye.openRef || 0) * 0.99, now.openRatio);
       const r = now.openRatio / Math.max(0.05, eye.openRef);
       const k = r > 0.85 ? 1 : Math.max(0.3, r);   // 눈 떠 있으면 원래 길이, 감길 때만 눌림
-      drawPixelEye(c, eye, lm, i, W, H, k * state.lashScale);
+      if (state.renderMode === 'strands' && liveLayer.profile) { if (i === 0 && (toneTick++ % 15 === 0)) measureTone(c, userLid(lm, 0, W, H)); drawStrandsEye(c, eye, lm, i, W, H, k, liveLayer.profile); }
+      else drawPixelEye(c, eye, lm, i, W, H, k * state.lashScale);
       return;
     }
     // 깜빡임: 개방도 비율만큼 세로로 눌림 (0.25~1.15로 제한)
@@ -803,6 +810,18 @@ function showSprite(eye) {
   x.strokeStyle = '#e6b800'; x.lineWidth = 2; x.beginPath();
   for (let t = -0.35; t <= 1.45; t += 0.05) { const q = refLidAt(R, t); t <= -0.35 ? x.moveTo(q.x - eye.rx, q.y - eye.ry) : x.lineTo(q.x - eye.rx, q.y - eye.ry); } x.stroke();
   const m = refLidAt(R, 0.5); x.strokeStyle = '#2ecc71'; x.beginPath(); x.moveTo(m.x - eye.rx, m.y - eye.ry); x.lineTo(m.x - eye.rx + R.up.x * w * 0.5, m.y - eye.ry + R.up.y * w * 0.5); x.stroke();
+  // D 프로파일: 읽어낸 가닥을 빨간 선으로 겹쳐 그림 (뿌리→끝 직선 근사)
+  if (liveLayer?.profile) {
+    const refAt = t => refLidAt(R, t), axisDir = norm(sub(R.outer, R.inner));
+    x.strokeStyle = 'rgba(255,60,60,0.8)'; x.lineWidth = 1;
+    for (const st of liveLayer.profile) {
+      const nrm = localNormal(refAt, st.t, R.up), sign = Math.sign(nrm.x * axisDir.y - nrm.y * axisDir.x) || 1;
+      const root = add(refAt(st.t), mul(nrm, w * 0.03)), d0 = rot(nrm, sign * st.ang), d1 = rot(d0, sign * st.curl);
+      const mid = add(root, mul(d0, st.len * w * 0.5)), end = add(mid, mul(d1, st.len * w * 0.5));
+      x.beginPath(); x.moveTo(root.x - eye.rx, root.y - eye.ry); x.lineTo(mid.x - eye.rx, mid.y - eye.ry); x.lineTo(end.x - eye.rx, end.y - eye.ry); x.stroke();
+    }
+    $('#dbgWrap').querySelector('label').textContent = `떼어낸 속눈썹 + D가 읽은 가닥 ${liveLayer.profile.length}개 (빨강)`;
+  }
 }
 $('#lashStrength').addEventListener('input', e => { state.lashStrength = +e.target.value; $('#strengthOut').textContent = (+e.target.value).toFixed(1); });
 $('#lashThick').addEventListener('input', e => { state.lashThick = +e.target.value; $('#thickOut').textContent = e.target.value; if (liveLayer?.pixel) $('#btnPixel').click(); });
@@ -889,6 +908,86 @@ function extractRefLashes() {
   const anchors = [inner, outer, add(mid, mul(up, w))];
   return { sprite, rx, ry, anchors, w, bg, refLash, lid: { inner, outer, top, up, root: pick.root ? pick.root.map(p => ({ ...p })) : null }, mirrored: false };
 }
+// ---- 방식 D: 스프라이트 알파에서 가닥 구조(길이·각도·컬·굵기)를 t별로 읽어냄 ----
+// 결과: [{t, len(w 단위), ang(법선 기준, +는 눈꼬리 쪽), curl(rad), weight(0~1)}]
+function analyzeStrands(L) {
+  const { sprite, rx, ry, w, lid } = L;
+  const sw = sprite.width, sh = sprite.height;
+  const a = sprite.getContext('2d').getImageData(0, 0, sw, sh).data;
+  const alphaAt = (x, y) => { const xi = Math.round(x - rx), yi = Math.round(y - ry); if (xi < 0 || yi < 0 || xi >= sw || yi >= sh) return 0; return a[(yi * sw + xi) * 4 + 3] / 255; };
+  const refAt = t => refLidAt(lid, t);
+  const globalUp = lid.up, axisDir = norm(sub(lid.outer, lid.inner));
+  const out = [];
+  const step = 1 / 70; // 눈 너비의 1/70 간격 (한쪽 눈 약 120 샘플)
+  // 한 지점에서 주어진 방향으로 알파 런 길이 측정 (작은 빈틈 허용)
+  const runLen = (p0, dir, maxLen) => {
+    let len = 0, gap = 0, sum = 0, cnt = 0, last = 0;
+    for (let d = 0; d <= maxLen; d += 1) {
+      const v = alphaAt(p0.x + dir.x * d, p0.y + dir.y * d);
+      if (v > 0.25) { gap = 0; last = d; sum += v; cnt++; } else if (++gap > w * 0.03) break;
+    }
+    return { len: last, mean: cnt ? sum / cnt : 0 };
+  };
+  for (let t = -0.3; t <= 1.4; t += step) {
+    const root = add(refAt(t), mul(localNormal(refAt, t, globalUp), w * 0.03));
+    const nrm = localNormal(refAt, t, globalUp);
+    const sign = Math.sign(nrm.x * axisDir.y - nrm.y * axisDir.x) || 1; // 눈꼬리 쪽으로 도는 회전 부호
+    // 1단계: 뿌리에서 ±40° 중 가장 길게 뻗는 각도
+    let best = { len: 0, ang: 0, mean: 0 };
+    for (let ang = -0.7; ang <= 0.7; ang += 0.07) {
+      const dir = rot(nrm, sign * ang); const r = runLen(root, dir, w * 0.7);
+      if (r.len > best.len) best = { len: r.len, ang, mean: r.mean };
+    }
+    if (best.len < w * 0.06) continue; // 너무 짧으면 가닥 아님
+    // 2단계: 중간 지점부터 다시 최적 각도 → 컬(방향 변화)
+    const mid = add(root, mul(rot(nrm, sign * best.ang), best.len * 0.5));
+    let best2 = { len: 0, ang: best.ang };
+    for (let ang = best.ang - 0.6; ang <= best.ang + 0.6; ang += 0.07) {
+      const r = runLen(mid, rot(nrm, sign * ang), w * 0.5);
+      if (r.len > best2.len) best2 = { len: r.len, ang };
+    }
+    const curl = best2.ang - best.ang; // 양수 = 뻗다가 눈꼬리 쪽으로 더 휨(캣). 위쪽 컬은 렌더러 CURL과 합성
+    out.push({ t, len: (best.len * 0.5 + best2.len) / w, ang: best.ang, curl, weight: Math.min(1, best.mean * 1.3) });
+  }
+  // 이웃과 비슷한 샘플은 같은 가닥일 가능성 → 살짝 솎아냄 (길이 지역 최대만 강조하되 전부 유지)
+  return out;
+}
+// 프로파일 렌더링: 사용자 눈꺼풀 위에 가닥을 새로 그림 (A 렌더러 계열)
+function drawStrandsEye(c, eye, lm, i, W, H, k, prof) {
+  const U = userLid(lm, i, W, H); const w = U.w;
+  const faceUp = U.up;
+  const tone = liveLayer.tone || 1;
+  const col = Math.round(18 * tone), colG = Math.round(12 * tone), colB = Math.round(12 * tone);
+  const rootOff = 0.02;
+  c.save(); c.lineCap = 'round';
+  // 결정적 지터 (프레임마다 떨리지 않게 t 기반)
+  const jit = (t, s) => { const x = Math.sin((t + 3) * 12.9898 * s) * 43758.5453; return x - Math.floor(x); };
+  for (const st of prof) {
+    const nrm = localNormal(U.at, st.t, U.up);
+    const axisDir = norm(sub(U.at(1), U.at(0)));
+    const sign = Math.sign(nrm.x * axisDir.y - nrm.y * axisDir.x) || 1;
+    const root = add(U.at(st.t), mul(nrm, w * rootOff));
+    const L = st.len * w * state.lashScale * (0.6 + 0.4 * k);
+    const d0 = rot(nrm, sign * st.ang);
+    const d1 = rot(d0, sign * st.curl * 0.6), d2 = rot(d0, sign * st.curl);
+    // 감길 때(k<1) 가닥이 눈꺼풀 쪽으로 눕도록 위 방향 성분 축소
+    const flat = v => norm(add(mul(v, k), mul(faceUp, -(1 - k) * 0.5)));
+    const c1 = add(root, mul(flat(d0), L * 0.4));
+    const c2 = add(root, add(mul(flat(d0), L * 0.55), mul(flat(d1), L * 0.3)));
+    const end = add(c2, mul(flat(d2), L * 0.3));
+    const segs = 6, base = (0.55 + 0.5 * w / 150) * (0.8 + st.weight * 0.6) * (1 + state.lashThick * 0.35);
+    let prev = root;
+    for (let s2 = 1; s2 <= segs; s2++) {
+      const u = s2 / segs, q = bez(root, c1, c2, end, u);
+      c.beginPath(); c.moveTo(prev.x, prev.y); c.lineTo(q.x, q.y);
+      c.lineWidth = Math.max(0.3, base * (1 - u * 0.85));
+      c.strokeStyle = `rgba(${col},${colG},${colB},${Math.min(1, state.lashStrength * 0.55) * st.weight * (1.05 - u * 0.4)})`;
+      c.stroke(); prev = q;
+    }
+  }
+  c.restore();
+}
+
 // 반대쪽 눈용: 스프라이트 좌우 반전 + 앵커도 반전
 function mirrorSprite(L) {
   const m = document.createElement('canvas'); m.width = L.sprite.width; m.height = L.sprite.height;
@@ -906,6 +1005,7 @@ $('#btnPixel').addEventListener('click', () => {
     fetch('/api/feedback', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ run_id: 'auto-points', note: 'err% ' + errs.join('/') }) }).catch(() => {});
   }
   const one = extractRefLashes(), two = mirrorSprite(one);
+  const profile = analyzeStrands(one);
   // 레퍼런스가 이미지상 왼쪽 눈인지 오른쪽 눈인지: 눈앞이 눈꼬리보다 오른쪽이면 이미지 왼쪽 눈(피사체 오른눈)
   const [inner, outer] = pick.pts;
   const refIsImgLeft = inner.x > outer.x;
@@ -915,7 +1015,7 @@ $('#btnPixel').addEventListener('click', () => {
       { sprite: forImgLeft.sprite, rx: forImgLeft.rx, ry: forImgLeft.ry, src: forImgLeft.anchors, lid: forImgLeft.lid, w: forImgLeft.w, mirrored: forImgLeft.mirrored, openAtCapture: 0.3, smooth: null, pixel: true },
       { sprite: forImgRight.sprite, rx: forImgRight.rx, ry: forImgRight.ry, src: forImgRight.anchors, lid: forImgRight.lid, w: forImgRight.w, mirrored: forImgRight.mirrored, openAtCapture: 0.3, smooth: null, pixel: true },
     ],
-    show: true, run_id: 'pixel-' + Date.now(), before: null, after: null, pixel: true, refBg: one.bg, refLash: one.refLash, tone: null,
+    show: true, run_id: 'pixel-' + Date.now(), before: null, after: null, pixel: true, refBg: one.bg, refLash: one.refLash, tone: null, profile,
   };
   $('#btnPixelOff').style.display = ''; $('#btnGenToggle').style.display = 'none';
   if (state.debug) showSprite(liveLayer.eyes[0]);
