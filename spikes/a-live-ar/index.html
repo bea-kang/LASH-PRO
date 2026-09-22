@@ -520,9 +520,11 @@ function drawFrame(src, W, H, lm) {
     const ys = [33, 133, 362, 263, 159, 145, 386, 374].map(i => lm[i].y * H);
     const bw = Math.max(...xs) - Math.min(...xs), bh = Math.max(...ys) - Math.min(...ys);
     const tcx = (Math.max(...xs) + Math.min(...xs)) / 2, tcy = (Math.max(...ys) + Math.min(...ys)) / 2;
-    const tz = Math.max(1, Math.min(4, Math.min(W / (bw * 1.35), H / (bh * 4))));
-    if (!view.init) { view.cx = tcx; view.cy = tcy; view.z = tz; view.init = true; }
-    const a = 0.15; view.cx += (tcx - view.cx) * a; view.cy += (tcy - view.cy) * a; view.z += (tz - view.z) * a;
+    // 눈이 화면 폭의 절반쯤만 차게. 너무 당기면 부담스러움
+    const tz = Math.max(1, Math.min(2.2, Math.min(W / (bw * 2.2), H / (bh * 6))));
+    const tcy2 = tcy + bh * 1.2; // 중심을 눈보다 살짝 아래로 (코까지 보이게)
+    if (!view.init) { view.cx = tcx; view.cy = tcy2; view.z = tz; view.init = true; }
+    const a = 0.15; view.cx += (tcx - view.cx) * a; view.cy += (tcy2 - view.cy) * a; view.z += (tz - view.z) * a;
     ctx.translate(W / 2, H / 2); ctx.scale(view.z, view.z); ctx.translate(-view.cx, -view.cy);
   } else if (state.zoom && view.init) {
     // 얼굴을 잠깐 놓쳐도 마지막 뷰 유지
@@ -1210,7 +1212,7 @@ function drawResult() {
   if (state.mirror) { ctx.translate(W, 0); ctx.scale(-1, 1); }
   // 합성된 영역(눈 주변 크롭)을 캔버스에 꽉 채움. 전체 보기면 그대로
   if (crop && !result.full) {
-    const pad = crop.cw * 0.08;
+    const pad = crop.cw * 0.35; // 눈 주변만이 아니라 얼굴이 같이 보이게
     const rx = Math.max(0, crop.x0 - pad), ry = Math.max(0, crop.y0 - pad);
     const rw = Math.min(W - rx, crop.cw + pad * 2), rh = Math.min(H - ry, crop.ch + pad * 2);
     const z = Math.min(W / rw, H / rh);
