@@ -21,9 +21,14 @@
 
 **Phase 0 — 품질 검증.** 셀카 + 레퍼런스로 납득되는 합성이 나오는지 먼저 확인한다. 이게 안 나오면 나머지는 의미 없음.
 
-## 스파이크
+## 스파이크 (spikes/a-live-ar)
 
-- `spikes/a-live-ar/` — 방식 A 실시간 파라미터 렌더링 데모. MediaPipe Face Landmarker + 2D 캔버스 가닥 렌더링. 컬 J/C/D, 구간별 길이 5개, 볼륨 3단계, 프리셋 3종.
-  - 레퍼런스 사진 → 래시 맵 번역: `server.py`의 `/api/lashmap`이 OpenAI 비전(gpt-4.1, json_schema)으로 컬·구간 길이·볼륨·스타일 JSON을 뽑아 바로 적용.
-  - 실행: `python3 spikes/a-live-ar/server.py` → http://localhost:8787 (Chrome/Safari, 카메라 허용). 키는 `spikes/a-live-ar/.env`의 `OPENAI_API_KEY` 하나로 번역·합성 다 됨. `GEMINI_API_KEY`는 비교용 선택.
-  - 사진 업로드 모드도 됨 (두 번째 Choose File)
+한 페이지에 세 단계 흐름. `python3 spikes/a-live-ar/server.py 8787` → http://localhost:8787 (Chrome/Safari, 카메라 허용). 키는 `spikes/a-live-ar/.env`의 `OPENAI_API_KEY` 하나.
+
+1. **카메라 켜기** — MediaPipe 얼굴 랜드마크. 눈이 작으면 "더 가까이" 안내.
+2. **디자인 올리기** — 샵 스크린샷 → gpt-4.1(래시 맵·대략 위치) → 눈 크롭 → gpt-5.5(눈앞·눈꼬리·뿌리 라인 5점) → 레퍼런스 속눈썹 픽셀을 매팅해서 내 눈꺼풀 곡선에 조각별로 붙임(방식 C). 자동. 점이 어긋나면 "점 수정".
+3. **캡처 → 실제처럼** — 라이브에 붙은 화면을 gpt-image-1에 보내 사실화(가이드 모드). 전/후 슬라이더, 저장, 1~5 평가 → `runs/`에 기록.
+
+`고급` 버튼: 방식 A(파라미터 렌더링), D(가닥 구조 추출 후 새로 그림), 엔진(GPT/Gemini), 맨 눈 합성, 디버그 오버레이, 세기/굵기 슬라이더.
+
+결정 경위는 [06-decisions](docs/06-decisions.md), 날짜별 배움은 [ideas/](ideas/).
