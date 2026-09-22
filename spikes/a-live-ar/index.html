@@ -410,8 +410,9 @@ function makeStrands() {
 function drawEye(lm, upperIdx, lowerIdx, side, W, H, faceUp) {
   const P = i => v2(lm[i].x * W, lm[i].y * H);
   let upper = upperIdx.map(P), lower = lowerIdx.map(P);
-  // 눈앞(안쪽) → 눈꼬리(바깥) 순으로 통일
-  if (side === 'R') { upper = upper.slice().reverse(); lower = lower.slice().reverse(); }
+  // 눈앞(안쪽) → 눈꼬리(바깥) 순으로 통일: 미간(168)에 가까운 끝이 눈앞
+  const nose = P(168);
+  if (len(sub(upper[0], nose)) > len(sub(upper[upper.length - 1], nose))) { upper = upper.slice().reverse(); lower = lower.slice().reverse(); }
   const inner = upper[0], outer = upper[upper.length - 1];
   const width = len(sub(outer, inner));
   const pxPerMm = width / 28;
@@ -518,7 +519,8 @@ const EYES = [
 // 깜빡임은 세로 비율(k)로만 반영: 지금 개방도 / 캡처 때 개방도
 function eyeAnchors(lm, e, W, H, k = 1) {
   const P = i => v2(lm[i].x * W, lm[i].y * H);
-  const inner = P(e.inner), outer = P(e.outer), top = P(e.top), bot = P(e.bot);
+  let inner = P(e.inner), outer = P(e.outer); const top = P(e.top), bot = P(e.bot);
+  const nose = P(168); if (len(sub(inner, nose)) > len(sub(outer, nose))) [inner, outer] = [outer, inner];
   const axis = sub(outer, inner), w = len(axis) || 1;
   let perp = v2(-axis.y, axis.x);                     // 축에 수직
   if ((perp.x * (top.x - bot.x) + perp.y * (top.y - bot.y)) < 0) perp = mul(perp, -1); // 윗눈꺼풀 쪽으로
@@ -602,8 +604,11 @@ function refLidAt(lid, t) {
 }
 // 사용자 윗눈꺼풀 폴리라인 (눈앞→눈꼬리), 라인 바깥쪽으로 살짝 띄운 뿌리 라인
 function userLid(lm, i, W, H) {
-  const idx = i === 0 ? R_UPPER.slice().reverse() : L_UPPER; // 눈앞→눈꼬리
-  const pts = idx.map(j => v2(lm[j].x * W, lm[j].y * H));
+  const idx = i === 0 ? R_UPPER.slice().reverse() : L_UPPER; // 눈앞→눈꼬리 (번호 가정)
+  let pts = idx.map(j => v2(lm[j].x * W, lm[j].y * H));
+  // 번호를 믿지 않고 미간(168)에 가까운 끝을 눈앞으로 확정
+  const nose = v2(lm[168].x * W, lm[168].y * H);
+  if (len(sub(pts[0], nose)) > len(sub(pts[pts.length - 1], nose))) pts = pts.slice().reverse();
   const bot = i === 0 ? v2(lm[145].x * W, lm[145].y * H) : v2(lm[374].x * W, lm[374].y * H);
   const inner = pts[0], outer = pts[pts.length - 1], axis = sub(outer, inner), w = len(axis) || 1;
   let up = norm(v2(-axis.y, axis.x));
