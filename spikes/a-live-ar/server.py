@@ -16,7 +16,9 @@ import urllib.request
 import requests
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OPENAI_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4.1")
+OPENAI_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4.1")          # 1차: 래시 맵 + 대략 위치 (빠름)
+OPENAI_POINTS_MODEL = os.environ.get("OPENAI_POINTS_MODEL", "gpt-5.5")          # 2차: 정밀 점 (2026-09-22 비교: 4.1보다 확실히 정확, low effort 8초)
+OPENAI_POINTS_EFFORT = os.environ.get("OPENAI_POINTS_EFFORT", "low")
 GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
 OPENAI_IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1")
 
@@ -139,14 +141,16 @@ def eyepoints(image_b64: str, media_type: str) -> dict:
     if not key:
         raise RuntimeError("OPENAI_API_KEY가 없어요.")
     body = {
-        "model": OPENAI_VISION_MODEL,
+        "model": OPENAI_POINTS_MODEL,
         "messages": [{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}", "detail": "high"}},
             {"type": "text", "text": EYEPOINTS_PROMPT},
         ]}],
         "response_format": {"type": "json_schema", "json_schema": {"name": "eye_points", "strict": True, "schema": EYEPOINTS_SCHEMA}},
     }
-    r = requests.post("https://api.openai.com/v1/chat/completions", headers={"Authorization": f"Bearer {key}"}, json=body, timeout=120)
+    if OPENAI_POINTS_MODEL.startswith(("gpt-5", "o")):
+        body["reasoning_effort"] = OPENAI_POINTS_EFFORT
+    r = requests.post("https://api.openai.com/v1/chat/completions", headers={"Authorization": f"Bearer {key}"}, json=body, timeout=180)
     if r.status_code != 200:
         raise RuntimeError(f"OpenAI {r.status_code}: {r.text[:600]}")
     msg = r.json()["choices"][0]["message"]
@@ -363,5 +367,5 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8787
-    print(f"spike A/B on http://localhost:{port}  (openai key: {'yes' if os.environ.get('OPENAI_API_KEY') else 'NO'} [vision {OPENAI_VISION_MODEL}], gemini: {'yes' if os.environ.get('GEMINI_API_KEY') else 'NO'} [{GEMINI_IMAGE_MODEL}], openai: {'yes' if os.environ.get('OPENAI_API_KEY') else 'NO'} [{OPENAI_IMAGE_MODEL}])", flush=True)
+    print(f"spike A/B on http://localhost:{port}  (openai key: {'yes' if os.environ.get('OPENAI_API_KEY') else 'NO'} [vision {OPENAI_VISION_MODEL}, points {OPENAI_POINTS_MODEL}/{OPENAI_POINTS_EFFORT}], gemini: {'yes' if os.environ.get('GEMINI_API_KEY') else 'NO'} [{GEMINI_IMAGE_MODEL}], openai: {'yes' if os.environ.get('OPENAI_API_KEY') else 'NO'} [{OPENAI_IMAGE_MODEL}])", flush=True)
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
