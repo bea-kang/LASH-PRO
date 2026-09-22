@@ -342,7 +342,8 @@ $('#btnPhoto').addEventListener('click', () => $('#file').click());
 $('#btnRef').addEventListener('click', () => $('#refFile').click());
 $('#btnCam').addEventListener('click', async () => {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    // 최대 해상도 요청 (눈 픽셀 수가 곧 품질). 안 되면 브라우저가 가능한 최대로 내려줌
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
     video.srcObject = stream; await video.play();
     if (landmarker) await landmarker.setOptions({ runningMode: 'VIDEO' });
     state.mode = 'video'; state.mirror = true; msg.textContent = ''; strands = null;
@@ -529,7 +530,7 @@ function drawFrame(src, W, H, lm) {
     if (ew < 110) { // 눈이 작으면 어떤 방식이든 가닥이 뭉개짐 → 가까이 오라고 안내
       ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.font = `${Math.round(H / 22)}px sans-serif`; ctx.textAlign = 'center';
       ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, H * 0.06, W, H / 12);
-      ctx.fillStyle = '#fff'; ctx.fillText('카메라에 더 가까이 오세요 (눈이 화면 폭의 1/4 이상)', W / 2, H * 0.06 + H / 16); ctx.restore();
+      ctx.fillStyle = '#fff'; ctx.fillText(`눈이 ${Math.round(ew)}px · 더 가까이 오세요 (폰 셀카 거리면 150px 이상)`, W / 2, H * 0.06 + H / 16); ctx.restore();
     }
     stats.textContent = `${fps ? fps + ' fps · ' : ''}속눈썹 라이브 · 눈 ${Math.round(ew)}px · 톤 ${(liveLayer.tone || 1).toFixed(2)}`;
   } else if (lm && state.show) {
