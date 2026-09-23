@@ -1114,7 +1114,7 @@ async function runTryon(guided, snap) {
   g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(1, 'rgba(0,0,0,0)');
   fctx.globalCompositeOperation = 'destination-in'; fctx.fillStyle = g; fctx.fillRect(0, 0, cw, ch);
   actx.drawImage(feather, x0, y0);
-  return { after, run_id: m.run_id, crop: { x0, y0, cw, ch }, guided: guidedOn };
+  return { after, run_id: m.run_id, crop: { x0, y0, cw, ch }, guided: guidedOn, judge: m.judge };
 }
 function snapshot() {
   const W = lastW, H = lastH, lm = lastLm;
@@ -1138,7 +1138,8 @@ $('#btnTryon').addEventListener('click', async () => {
   const t0 = performance.now();
   try {
     const r = await runTryon(state.guided, snap);
-    showResult(snap.before, r.after, r.run_id, `완료 (${r.guided ? '겹친 화면 사실화' : '맨 눈 합성'}) · ${((performance.now() - t0) / 1000).toFixed(1)}초 · 슬라이더로 전/후 비교. 실제 시술 결과와 다를 수 있어요.`, r.crop);
+    const j = r.judge ? ` · 자동 채점: 레퍼런스 유사도 ${r.judge.overall_similarity}/5 (길이 ${r.judge.length_match} · 질감 ${r.judge.texture_match} · 밀도 ${r.judge.density_match} · 실제감 ${r.judge.realism}) — ${r.judge.biggest_difference}` : '';
+    showResult(snap.before, r.after, r.run_id, `완료 (${r.guided ? '겹친 화면 사실화' : '맨 눈 합성'}) · ${((performance.now() - t0) / 1000).toFixed(1)}초${j}`, r.crop);
   } catch (err) {
     st.className = 'hint err'; st.textContent = '실패: ' + err.message;
   } finally { updateTryonBtn(); }
@@ -1156,10 +1157,10 @@ $('#btnCompare').addEventListener('click', async () => {
   try {
     st.className = 'hint'; st.textContent = 'A 만드는 중… (20~50초)';
     const A = await runTryon(true, snap);
-    paintAB('#abA', A.after, A.crop);
+    paintAB('#abA', A.after, A.crop); if (A.judge) $('#abWrap').querySelectorAll('.hint')[0].textContent = `A · 겹친 화면 사실화 · 유사도 ${A.judge.overall_similarity}/5 · 질감 ${A.judge.texture_match}`;
     st.textContent = 'B 만드는 중… (20~50초)';
     const B = await runTryon(false, snap);
-    paintAB('#abB', B.after, B.crop);
+    paintAB('#abB', B.after, B.crop); if (B.judge) $('#abWrap').querySelectorAll('.hint')[1].textContent = `B · 맨 눈 합성 · 유사도 ${B.judge.overall_similarity}/5 · 질감 ${B.judge.texture_match}`;
     ab = { A, B, before: snap.before };
     st.className = 'hint ok'; st.textContent = `둘 다 완료 · ${((performance.now() - t0) / 1000).toFixed(0)}초. 아래에서 더 나은 쪽을 골라주세요.`;
   } catch (err) { st.className = 'hint err'; st.textContent = '실패: ' + err.message; }

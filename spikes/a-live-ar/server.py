@@ -16,6 +16,8 @@ import urllib.request
 
 import requests
 
+sys.path.insert(0, os.path.join(HERE, "..", "eval")) if False else None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 OPENAI_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4.1")          # 1차: 래시 맵 + 대략 위치 (빠름)
 OPENAI_POINTS_MODEL = os.environ.get("OPENAI_POINTS_MODEL", "gpt-5.5")          # 2차: 정밀 점 (2026-09-22 비교: 4.1보다 확실히 정확, low effort 8초)
@@ -295,6 +297,24 @@ def openai_tryon(frame_b64, frame_mime, ref_b64, ref_mime, prompt):
 ENGINES = {"gemini": gemini_tryon, "openai": openai_tryon}
 
 
+def judge_result(ref_b64, ref_mime, out_b64, out_mime):
+    """합성 결과를 레퍼런스와 비교 채점 (spikes/eval/judge.py). 실패해도 합성은 성공으로 둠."""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("judge", os.path.join(HERE, "..", "eval", "judge.py"))
+        judge = importlib.util.module_from_spec(spec); spec.loader.exec_module(judge)
+        from PIL import Image
+        import io as _io
+        ref = Image.open(_io.BytesIO(base64.b64decode(ref_b64))).convert("RGB")
+        out = Image.open(_io.BytesIO(base64.b64decode(out_b64))).convert("RGB")
+        # 결과는 양쪽 눈 크롭(1536x1024) → 왼쪽 절반(한쪽 눈)만
+        out = out.crop((0, 0, out.width // 2, out.height))
+        return judge.judge(ref, out, n=1)["runs"][0]
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write("judge: ERR %s\n" % e)
+        return None
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=HERE, **kw)
@@ -368,7 +388,13 @@ class Handler(SimpleHTTPRequestHandler):
             with open(os.path.join(d, "meta.json"), "w") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=1)
             sys.stderr.write("tryon[%s] %s: ok %s %d bytes %.1fs\n" % (engine, run_id, mime, len(b64), meta["seconds"]))
-            return self._json(200, {"image": f"data:{mime};base64,{b64}", "run_id": run_id, "seconds": meta["seconds"]})
+            score = judge_result(rb, rm, b64, mime) if req.get("judge", True) else None
+            if score:
+                meta["judge"] = score
+                with open(os.path.join(d, "meta.json"), "w") as f:
+                    json.dump(meta, f, ensure_ascii=False, indent=1)
+                sys.stderr.write("judge %s: overall %s tex %s len %s | %s\n" % (run_id, score["overall_similarity"], score["texture_match"], score["length_match"], score["biggest_difference"]))
+            return self._json(200, {"image": f"data:{mime};base64,{b64}", "run_id": run_id, "seconds": meta["seconds"], "judge": score})
         except Exception as e:  # noqa: BLE001
             sys.stderr.write("tryon: ERR %s\n" % e)
             return self._json(500, {"error": str(e)})
