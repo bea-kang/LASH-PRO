@@ -188,9 +188,12 @@ def build_prompt(m, geom, guided):
     else:
         lines.append("Image 1 is a close-up photo of a person's eyes. Image 2 is a salon reference photo of eyelash extensions.")
         lines.append("Put the EXACT lash design from image 2 onto the person in image 1.")
-    drama = m.get("drama")
-    if drama and drama >= 3:
-        lines.append("Match image 2's boldness: this design is dramatic, not natural — reproduce it at the same intensity relative to the eye. Do NOT tone it down, shorten it, or make it 'natural'.")
+    drama = m.get("drama") or 3
+    sparse = m.get("volume") == "natural" or m.get("texture") == "wispy"
+    if sparse:
+        lines.append("IMPORTANT: image 2 is a SPARSE, separated design — only a few distinct lashes/spikes with visible skin and gaps between them. Do NOT fill the lash line into a full, dense, uniform fan. Fewer lashes than you would normally draw. If in doubt, draw fewer.")
+    if drama >= 4:
+        lines.append("Match image 2's boldness (long, dramatic) at the same intensity relative to the eye. Do not shorten it.")
     else:
         lines.append("Match image 2's intensity exactly — neither bolder nor more natural than the reference.")
     lines.append("Copy these from image 2 precisely:")
@@ -203,7 +206,7 @@ def build_prompt(m, geom, guided):
     else:
         lines.append(f"- Tips: {TEX_LINE.get(m.get('texture'), 'as in image 2')}.")
     lines.append(f"- Shape: {STYLE_LINE.get(m.get('style'), 'as in image 2')}.")
-    lines.append("- Density: full and dark along the whole upper lash line, from inner corner to outer corner, as dense as image 2.")
+    lines.append("- Density: exactly as dense as image 2 — no fuller." if sparse else "- Density: full and dark along the whole upper lash line, as dense as image 2.")
     if m.get("lower_lashes"):
         lines.append("- Lower lashes: image 2 also has short wispy spikes on the lower lash line — add them too.")
     lines.append(f"- Curl: {CURL_LINE.get(m.get('curl'), 'as in image 2')}. Color: black.")
