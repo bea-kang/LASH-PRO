@@ -74,7 +74,7 @@ def gemini_gen(fb, rb, prompt, model):
 
 def generate(v, fb, rb, meta, log):
     """variant → (png_path, cost). 캐시 우선."""
-    prompt = PROMPT_STYLES[v["prompt"]](meta.get("lashmap") or {}, meta.get("geom") or {"tipRatio": 0.45, "spikes": 7})
+    prompt = PROMPT_STYLES[v["prompt"]](meta.get("lashmap") or {}, meta.get("geom") or {})
     k = key_of(v["model"], v["quality"], v["prompt"], v.get("fidelity", "high"), hashlib.sha1(fb.encode()).hexdigest()[:8], hashlib.sha1(rb.encode()).hexdigest()[:8], prompt)
     path = os.path.join(CACHE, k + ".png")
     if os.path.exists(path):
@@ -121,12 +121,12 @@ def main():
     variants += [{"model": "openai", "quality": "low", "prompt": "sparse", "fidelity": "low"}]  # 얼굴 보존 낮추면 디자인 충실도 오르는지
     variants = variants[: a.explore]
     rows = []
-    log("## 탐색 (quality low, mini 심사 1회)\n\n| 변형 | 유사도 | 길이 | 분포 | 질감 | 밀도 | 실제감 | 비용 |\n|---|---|---|---|---|---|---|---|")
+    log("## 탐색 (quality low, 5.5 심사 1회)\n\n| 변형 | 유사도 | 길이 | 분포 | 질감 | 밀도 | 실제감 | 비용 |\n|---|---|---|---|---|---|---|---|")
     for v in variants:
         if spent >= a.budget: log(f"예산 소진 (${spent:.2f}) — 탐색 중단"); break
         try:
             path, c1 = generate(v, fb, rb, meta, log); spent += c1
-            res, c2 = score(ref_img, path, "gpt-5.4-mini", 1); spent += c2
+            res, c2 = score(ref_img, path, "gpt-5.5", 1); spent += c2  # mini는 후하게 줘서 순위가 안 맞음 → 5.5 1회
             s = res["runs"][0]; rows.append((s["overall_similarity"], v, path, s))
             log(f"| {v['model']}/{v['prompt']}{'/fid-low' if v.get('fidelity')=='low' else ''} | {s['overall_similarity']} | {s['length_match']} | {s['shape_match']} | {s['texture_match']} | {s['density_match']} | {s['realism']} | ${c1+c2:.2f} |")
         except Exception as e:
