@@ -46,6 +46,11 @@ LASHMAP_SCHEMA = {
     "type": "object",
     "properties": {
         "is_lash_photo": {"type": "boolean"},
+        # 시판 속눈썹(스트립) 제품 사진: 흰/단색 배경에 띠 형태. 이 경우 눈 기준점 대신 띠 양 끝점을 씀
+        "is_product_strip": {"type": "boolean"},
+        "strip_left_x": {"type": "number"}, "strip_left_y": {"type": "number"},
+        "strip_right_x": {"type": "number"}, "strip_right_y": {"type": "number"},
+        "strip_lashes_side": {"type": "string", "enum": ["up", "down", "left", "right"]},
         "curl": {"type": "string", "enum": ["J", "C", "D"]},
         # structured output은 minItems>1, minimum/maximum을 안 받음 → 5구간 개별 필드 + 서버에서 클램프
         "len_inner_mm": {"type": "integer"},
@@ -65,11 +70,13 @@ LASHMAP_SCHEMA = {
         "confidence": {"type": "number"},
         "notes": {"type": "string"},
     },
-    "required": ["is_lash_photo", "curl", "len_inner_mm", "len_inner_mid_mm", "len_center_mm", "len_outer_mid_mm", "len_outer_mm", "volume", "style", "texture", "lower_lashes", "drama", "inner_corner_x", "inner_corner_y", "outer_corner_x", "outer_corner_y", "lash_root_center_x", "lash_root_center_y", "confidence", "notes"],
+    "required": ["is_lash_photo", "is_product_strip", "strip_left_x", "strip_left_y", "strip_right_x", "strip_right_y", "strip_lashes_side", "curl", "len_inner_mm", "len_inner_mid_mm", "len_center_mm", "len_outer_mid_mm", "len_outer_mm", "volume", "style", "texture", "lower_lashes", "drama", "inner_corner_x", "inner_corner_y", "outer_corner_x", "outer_corner_y", "lash_root_center_x", "lash_root_center_y", "confidence", "notes"],
     "additionalProperties": False,
 }
 
-PROMPT = """이 사진은 속눈썹 연장 샵의 시술 결과 레퍼런스입니다. 이 디자인을 다른 사람 눈에 재현하기 위한 래시 맵(시술 사양)으로 번역하세요.
+PROMPT = """이 사진은 속눈썹 디자인 레퍼런스입니다. (a) 샵 시술 결과 사진이거나 (b) 시판 속눈썹(스트립/붙임 속눈썹) 제품 사진입니다. 이 디자인을 다른 사람 눈에 재현하기 위한 래시 맵(시술 사양)으로 번역하세요.
+
+- is_product_strip: 눈이 아니라 제품 자체(띠에 붙은 속눈썹, 보통 흰/단색 배경, 케이스 위)가 찍힌 사진이면 true. 이 경우 strip_left/right는 띠(뿌리 밴드)의 양 끝점(이미지 폭·높이 대비 0~1), strip_lashes_side는 띠 기준으로 속눈썹 가닥이 뻗어 있는 방향. 제품이 여러 개면 가장 크고 선명한 것 하나. 눈 사진이면 false로 두고 strip 값은 0, side는 up.
 
 - curl: J(거의 직선, 살짝 올라감) / C(표준 컬) / D(강한 컬, 눈꺼풀 쪽으로 많이 감김)
 - len_inner_mm → len_inner_mid_mm → len_center_mm → len_outer_mid_mm → len_outer_mm: 눈앞(내안각)부터 눈꼬리(외안각)까지 5구간의 연장 길이(mm). 실제 샵 사양 범위(6~15mm)로. 사진의 자연 속눈썹 길이와 비교해 추정.
