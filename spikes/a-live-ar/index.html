@@ -1086,7 +1086,12 @@ async function runTryon(guided, snap) {
   const guidedOn = guided && liveLayer?.pixel && liveLayer.show;
   const input = document.createElement('canvas'); input.width = W; input.height = H;
   const ictx = input.getContext('2d'); ictx.drawImage(before, 0, 0);
-  if (guidedOn) { const savedTone = liveLayer.tone; drawLiveLayer(ictx, lm, W, H, false); liveLayer.tone = savedTone; }
+  if (guidedOn) { // 가이드 입력은 화면 설정과 무관하게 진하고 굵게 (스파이크 위치를 확실히 전달)
+    const saved = { tone: liveLayer.tone, st: state.lashStrength, th: state.lashThick, sc: state.lashScale };
+    state.lashStrength = 3; state.lashScale = Math.max(1, state.lashScale); liveLayer.tone = 0.8;
+    drawLiveLayer(ictx, lm, W, H, false);
+    liveLayer.tone = saved.tone; state.lashStrength = saved.st; state.lashThick = saved.th; state.lashScale = saved.sc;
+  }
   // 양쪽 눈 바운딩 박스 → 3:2 크롭 (gpt-image-1 출력이 1536x1024 고정이라 비율을 맞춰야 전/후가 정렬됨)
   const ids = [33, 133, 362, 263, 159, 145, 386, 374];
   const xs = ids.map(i => lm[i].x * W), ys = ids.map(i => lm[i].y * H);
@@ -1116,6 +1121,7 @@ async function runTryon(guided, snap) {
   actx.drawImage(feather, x0, y0);
   return { after, run_id: m.run_id, crop: { x0, y0, cw, ch }, guided: guidedOn, judge: m.judge };
 }
+function eyePx() { const lm = lastLm, W = lastW, H = lastH; return lm ? len(sub(v2(lm[33].x * W, lm[33].y * H), v2(lm[133].x * W, lm[133].y * H))) : 0; }
 function snapshot() {
   const W = lastW, H = lastH, lm = lastLm;
   const before = document.createElement('canvas'); before.width = W; before.height = H;
@@ -1132,6 +1138,7 @@ function showResult(before, after, run_id, msg, crop) {
 $('#btnTryon').addEventListener('click', async () => {
   const st = $('#tryonStatus');
   if (!lastLm || !lastSrc || !refDataUrl) return;
+  if (eyePx() < 120) { st.className = 'hint err'; st.textContent = `눈이 ${Math.round(eyePx())}px예요. 120px 이상 되게 카메라에 더 가까이 온 뒤 눌러주세요.`; return; }
   const snap = snapshot();
   $('#btnTryon').disabled = true; $('#btnCompare').disabled = true; st.className = 'hint';
   st.textContent = (state.guided && liveLayer?.pixel && liveLayer.show ? '라이브 속눈썹 위치를 기준으로 ' : '맨 눈에서 ') + '만드는 중… (20~70초)';
@@ -1149,6 +1156,7 @@ let ab = null;
 $('#btnCompare').addEventListener('click', async () => {
   const st = $('#tryonStatus');
   if (!lastLm || !lastSrc || !refDataUrl) return;
+  if (eyePx() < 120) { st.className = 'hint err'; st.textContent = `눈이 ${Math.round(eyePx())}px예요. 120px 이상 되게 카메라에 더 가까이 온 뒤 눌러주세요.`; return; }
   const snap = snapshot();
   $('#btnTryon').disabled = true; $('#btnCompare').disabled = true;
   $('#abWrap').style.display = ''; $('#abStatus').textContent = '';
