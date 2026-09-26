@@ -104,8 +104,9 @@
     <div class="ref step">
       <label>3. 캡처해서 실제처럼 보기</label>
       <div class="seg adv" id="engine">
-        <button data-v="openai" class="on">GPT (gpt-image-1)</button>
-        <button data-v="gemini">Gemini (flash-image)</button>
+        <button data-v="auto" class="on">자동 (위스피→Gemini Pro, 고른→Gemini Flash)</button>
+        <button data-v="openai">GPT (gpt-image-1)</button>
+        <button data-v="gemini">Gemini (설정값)</button>
       </div>
       <div class="seg adv" id="guided">
         <button data-v="1" class="on">라이브 겹친 화면을 사실화</button>
@@ -217,7 +218,7 @@ const VOLUME = { natural: [40, 1], volume: [42, 2], mega: [44, 3] };
 const state = {
   zones: [...PRESETS.natural], curl: 'C', volume: 'natural',
   opacity: 0.85, show: true, mirror: true, mode: null, // 'video' | 'image'
-  texture: 'even', zoom: true, engine: 'openai', lashScale: 1, lashStrength: 1.5, lashThick: 0, debug: false, renderMode: 'pixel', guided: true, simple: !location.search.includes('adv'),
+  texture: 'even', zoom: true, engine: 'auto', lashScale: 1, lashStrength: 1.5, lashThick: 0, debug: false, renderMode: 'pixel', guided: true, simple: !location.search.includes('adv'),
 };
 // 눈 확대 보기: 프레임 간 부드럽게 따라가는 뷰 상태
 const view = { cx: 0, cy: 0, z: 1, init: false };

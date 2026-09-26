@@ -381,7 +381,16 @@ class Handler(SimpleHTTPRequestHandler):
             req = json.loads(self.rfile.read(n))
             fm, fb = split_data_url(req["frame"])
             rm, rb = split_data_url(req["reference"])
-            engine = req.get("engine", "gemini")
+            engine = req.get("engine", "auto")
+            lm = req.get("lashmap") or {}
+            if engine == "auto":
+                # 2026-09-26 비교: 위스피/과감 → gemini-3-pro-image(질감 4.0), 고른 스타일 → gemini-3.1-flash-image(실제감 5.0, 싸다)
+                if os.environ.get("GEMINI_API_KEY"):
+                    engine = "gemini"
+                    global GEMINI_IMAGE_MODEL
+                    GEMINI_IMAGE_MODEL = "gemini-3-pro-image" if (lm.get("texture") == "wispy" or (lm.get("drama") or 0) >= 4) else "gemini-3.1-flash-image"
+                else:
+                    engine = "openai"
             if engine not in ENGINES:
                 return self._json(400, {"error": f"unknown engine {engine}"})
             prompt = build_prompt(req.get("lashmap"), req.get("geom"), bool(req.get("guided")))
