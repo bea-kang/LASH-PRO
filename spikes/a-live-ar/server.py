@@ -150,7 +150,14 @@ EYEPOINTS_PROMPT = """이 이미지는 한쪽 눈을 크게 자른 사진입니�
 """
 
 
-def eyepoints(image_b64: str, media_type: str) -> dict:
+EYEPOINTS_EXT_SCHEMA = json.loads(json.dumps(EYEPOINTS_SCHEMA))
+for _j in range(5):
+    EYEPOINTS_EXT_SCHEMA["properties"][f"lower_x{_j}"] = {"type": "number"}; EYEPOINTS_EXT_SCHEMA["properties"][f"lower_y{_j}"] = {"type": "number"}
+    EYEPOINTS_EXT_SCHEMA["required"] += [f"lower_x{_j}", f"lower_y{_j}"]
+EYEPOINTS_EXT_PROMPT = EYEPOINTS_PROMPT + "- lower_0..lower_4: 아랫눈꺼풀 라인(눈 구멍의 아래 경계, 아래 속눈썹 뿌리)을 눈앞(lower_0)에서 눈꼬리(lower_4)까지 등간격 5점.\n"
+
+
+def eyepoints(image_b64: str, media_type: str, lower: bool = False) -> dict:
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
         raise RuntimeError("OPENAI_API_KEY가 없어요.")
@@ -158,9 +165,9 @@ def eyepoints(image_b64: str, media_type: str) -> dict:
         "model": OPENAI_POINTS_MODEL,
         "messages": [{"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}", "detail": "high"}},
-            {"type": "text", "text": EYEPOINTS_PROMPT},
+            {"type": "text", "text": EYEPOINTS_EXT_PROMPT if lower else EYEPOINTS_PROMPT},
         ]}],
-        "response_format": {"type": "json_schema", "json_schema": {"name": "eye_points", "strict": True, "schema": EYEPOINTS_SCHEMA}},
+        "response_format": {"type": "json_schema", "json_schema": {"name": "eye_points", "strict": True, "schema": EYEPOINTS_EXT_SCHEMA if lower else EYEPOINTS_SCHEMA}},
     }
     if OPENAI_POINTS_MODEL.startswith(("gpt-5", "o")):
         body["reasoning_effort"] = OPENAI_POINTS_EFFORT
@@ -251,15 +258,20 @@ def gemini_tryon(frame_b64, frame_mime, ref_b64, ref_mime, prompt):
                 {"inlineData": {"mimeType": ref_mime, "data": ref_b64}},
             ],
         }],
-        "generationConfig": {"responseModalities": ["IMAGE"]},
+        "generationConfig": {"responseModalities": ["IMAGE"], "imageConfig": {"aspectRatio": "3:2"}},  # 입력(1536x1024)과 같은 비율로 → 전/후 정렬
     }
-    req = urllib.request.Request(
-        url, data=json.dumps(body).encode(), method="POST",
-        headers={"Content-Type": "application/json", "x-goog-api-key": key},
-    )
-    try:
+    def _call(b):
+        req = urllib.request.Request(url, data=json.dumps(b).encode(), method="POST", headers={"Content-Type": "application/json", "x-goog-api-key": key})
         with urllib.request.urlopen(req, timeout=120) as r:
-            resp = json.loads(r.read())
+            return json.loads(r.read())
+    try:
+        try:
+            resp = _call(body)
+        except urllib.error.HTTPError as e:
+            if e.code == 400 and "imageConfig" in json.dumps(body):   # 모델이 imageConfig 를 안 받으면 빼고 재시도
+                body["generationConfig"].pop("imageConfig", None); resp = _call(body)
+            else:
+                raise
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")[:600]
         raise RuntimeError(f"Gemini {e.code}: {detail}") from None
@@ -307,7 +319,58 @@ def openai_tryon(frame_b64, frame_mime, ref_b64, ref_mime, prompt):
 ENGINES = {"gemini": gemini_tryon, "openai": openai_tryon}
 
 
-def judge_result(ref_b64, ref_mime, out_b64, out_mime):
+# ---- 눈 단위 합성 (2026-09-26): 배율 맞춘 눈 크롭 → 생성 → 속눈썹만 전이 (lashcomp.py) ----
+def single_eye_prompt(prompt: str) -> str:
+    """전체 프레임용 프롬프트를 한쪽 눈 크롭용으로. 배율이 같다는 것과 눈을 옮기지 말라는 것을 명시."""
+    prompt = prompt.replace("Image 1 is a close-up photo of a person's eyes. Image 2 is a salon reference photo of eyelash extensions.",
+                            "Image 1 is a close-up photo of ONE eye of a person. Image 2 is a salon reference photo of eyelash extensions on one eye, shown at the SAME SCALE as image 1 (both eyes are about the same width in the frame), so copy the lash lengths and thickness at the same pixel scale.")
+    return prompt.replace("Return only the edited version of image 1, same size and framing.",
+                          "The eye in image 1 must stay at exactly the same position, size and shape; only add the lashes. Return only the edited version of image 1, same size and framing.")
+
+
+def _pts_to_eye(m: dict, W: int, H: int) -> dict:
+    P = lambda kx, ky: (m[kx] * W, m[ky] * H)
+    e = {"inner": P("inner_corner_x", "inner_corner_y"), "outer": P("outer_corner_x", "outer_corner_y"), "root": [P(f"root_x{j}", f"root_y{j}") for j in range(5)]}
+    if "lower_x0" in m: e["lower"] = [P(f"lower_x{j}", f"lower_y{j}") for j in range(5)]
+    return e
+
+
+def tryon_eyes(frame_b64, ref_b64, ref_mime, eyes, ref_eye, engine, prompt, lower):
+    """eyes: {side: {inner:[x,y], outer:[x,y], root:[[x,y]*n], lower:[[x,y]*n]}} (프레임 픽셀). ref_eye: {inner, outer} (레퍼런스 크롭 픽셀, 1536x1024 기준).
+    returns (result PIL, per-eye dict)."""
+    import io as _io, threading
+    import lashcomp
+    from PIL import Image
+    frame = Image.open(_io.BytesIO(base64.b64decode(frame_b64))).convert("RGB"); W, H = frame.size
+    ri, ro = ref_eye["inner"], ref_eye["outer"]
+    ref_frac = max(0.2, min(0.8, ((ro[0] - ri[0]) ** 2 + (ro[1] - ri[1]) ** 2) ** 0.5 / lashcomp.OUT_W))
+    ref_center = ((ri[0] + ro[0]) / 2 / lashcomp.OUT_W, (ri[1] + ro[1]) / 2 / lashcomp.OUT_H)
+    per = {}
+    def work(side, e):
+        eye = {"inner": tuple(e["inner"]), "outer": tuple(e["outer"]), "root": [tuple(p) for p in e["root"]]}
+        if e.get("lower"): eye["lower"] = [tuple(p) for p in e["lower"]]
+        box = lashcomp.crop_box(eye, W, H, ref_frac, ref_center)
+        cb = lashcomp.crop_b64(frame, box)
+        t0 = time.time()
+        mime, out_b64 = ENGINES[engine](cb, "image/jpeg", ref_b64, ref_mime, prompt)
+        out = Image.open(_io.BytesIO(base64.b64decode(out_b64))).convert("RGB").resize((lashcomp.OUT_W, lashcomp.OUT_H), Image.LANCZOS)
+        buf = _io.BytesIO(); out.save(buf, "JPEG", quality=90); out_jpg = base64.b64encode(buf.getvalue()).decode()
+        m = eyepoints(out_jpg, "image/jpeg", lower=True)           # 생성 결과 위의 눈 점 (눈이 옮겨져도 (u,v) 로 전이)
+        eye_out = _pts_to_eye(m, lashcomp.OUT_W, lashcomp.OUT_H)
+        per[side] = {"eye": eye, "box": box, "out": out, "out_jpg": out_jpg, "pts": m, "eye_out": eye_out, "gen_seconds": round(time.time() - t0, 1)}
+    threads = [threading.Thread(target=work, args=(side, e)) for side, e in eyes.items()]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    if len(per) != len(eyes):
+        raise RuntimeError("눈 합성 일부 실패 (서버 로그 참고)")
+    result = frame
+    for side, d in per.items():
+        result, dbg = lashcomp.transfer_eye(result, d["eye"], d["out"], d["eye_out"], d["box"], lower=lower)
+        d["blur"] = dbg["blur"]
+    return result, per
+
+
+def judge_result(ref_b64, ref_mime, out_b64, out_mime, crop_left=True):
     """합성 결과를 레퍼런스와 비교 채점 (spikes/eval/judge.py). 실패해도 합성은 성공으로 둠."""
     try:
         import importlib.util
@@ -318,7 +381,7 @@ def judge_result(ref_b64, ref_mime, out_b64, out_mime):
         ref = Image.open(_io.BytesIO(base64.b64decode(ref_b64))).convert("RGB")
         out = Image.open(_io.BytesIO(base64.b64decode(out_b64))).convert("RGB")
         # 결과는 양쪽 눈 크롭(1536x1024) → 왼쪽 절반(한쪽 눈)만
-        out = out.crop((0, 0, out.width // 2, out.height))
+        if crop_left: out = out.crop((0, 0, out.width // 2, out.height))
         return judge.judge(ref, out, n=1)["runs"][0]
     except Exception as e:  # noqa: BLE001
         sys.stderr.write("judge: ERR %s\n" % e)
@@ -395,25 +458,43 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(400, {"error": f"unknown engine {engine}"})
             prompt = build_prompt(req.get("lashmap"), req.get("geom"), bool(req.get("guided")))
             t0 = time.time()
-            mime, b64 = ENGINES[engine](fb, fm, rb, rm, prompt)
             run_id = time.strftime("%Y%m%d-%H%M%S")
-            # 실험 기록: 입력/출력 이미지 + 메타 (runs/ 는 gitignore)
             d = os.path.join(HERE, "runs", run_id); os.makedirs(d, exist_ok=True)
+            extra = {}
+            if req.get("eyes"):
+                # 눈 단위: 눈마다 레퍼런스 배율로 크롭 → 생성 → 속눈썹만 전이. 눈·피부·눈썹은 원본 그대로
+                import io as _io
+                prompt = single_eye_prompt(prompt)
+                lower = bool(lm.get("lower_lashes"))
+                result, per = tryon_eyes(fb, rb, rm, req["eyes"], req["refEye"], engine, prompt, lower)
+                buf = _io.BytesIO(); result.save(buf, "JPEG", quality=92); mime, b64 = "image/jpeg", base64.b64encode(buf.getvalue()).decode()
+                for side, e in per.items():
+                    e["out"].save(os.path.join(d, f"eye-{side}-raw.jpg"), quality=90)
+                    extra.setdefault("eyes", {})[side] = {"box": e["box"], "out": "data:image/jpeg;base64," + e["out_jpg"], "pts": e["pts"], "gen_seconds": e["gen_seconds"]}
+                # 심사용: 첫 눈 박스를 결과에서 잘라 레퍼런스와 비교
+                side0 = next(iter(per)); x0, y0, cw, ch = per[side0]["box"]
+                jb = _io.BytesIO(); result.crop((x0, y0, x0 + cw, y0 + ch)).resize((1536, 1024)).save(jb, "JPEG", quality=90)
+                judge_b64, judge_mime, judge_crop = base64.b64encode(jb.getvalue()).decode(), "image/jpeg", False
+            else:
+                mime, b64 = ENGINES[engine](fb, fm, rb, rm, prompt)
+                judge_b64, judge_mime, judge_crop = b64, mime, True
+            # 실험 기록: 입력/출력 이미지 + 메타 (runs/ 는 gitignore)
             for name, mt, data in (("frame", fm, fb), ("reference", rm, rb), ("result", mime, b64)):
                 with open(os.path.join(d, name + "." + mt.split("/")[-1].replace("jpeg", "jpg")), "wb") as f:
                     f.write(base64.b64decode(data))
-            meta = {"run_id": run_id, "engine": engine, "guided": bool(req.get("guided")), "model": OPENAI_IMAGE_MODEL if engine == "openai" else GEMINI_IMAGE_MODEL,
-                    "seconds": round(time.time() - t0, 1), "lashmap": req.get("lashmap"), "geom": req.get("geom"), "prompt": prompt}
+            meta = {"run_id": run_id, "engine": engine, "mode": "eyes" if req.get("eyes") else "frame", "guided": bool(req.get("guided")), "model": OPENAI_IMAGE_MODEL if engine == "openai" else GEMINI_IMAGE_MODEL,
+                    "seconds": round(time.time() - t0, 1), "lashmap": req.get("lashmap"), "geom": req.get("geom"), "prompt": prompt,
+                    "eyes": {k: {"box": v["box"], "pts": v["pts"]} for k, v in extra.get("eyes", {}).items()} or None}
             with open(os.path.join(d, "meta.json"), "w") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=1)
-            sys.stderr.write("tryon[%s] %s: ok %s %d bytes %.1fs\n" % (engine, run_id, mime, len(b64), meta["seconds"]))
-            score = judge_result(rb, rm, b64, mime) if req.get("judge", True) else None
+            sys.stderr.write("tryon[%s/%s] %s: ok %s %d bytes %.1fs\n" % (engine, meta["mode"], run_id, mime, len(b64), meta["seconds"]))
+            score = judge_result(rb, rm, judge_b64, judge_mime, crop_left=judge_crop) if req.get("judge", True) else None
             if score:
                 meta["judge"] = score
                 with open(os.path.join(d, "meta.json"), "w") as f:
                     json.dump(meta, f, ensure_ascii=False, indent=1)
                 sys.stderr.write("judge %s: overall %s tex %s len %s | %s\n" % (run_id, score["overall_similarity"], score["texture_match"], score["length_match"], score["biggest_difference"]))
-            return self._json(200, {"image": f"data:{mime};base64,{b64}", "run_id": run_id, "seconds": meta["seconds"], "judge": score})
+            return self._json(200, {"image": f"data:{mime};base64,{b64}", "run_id": run_id, "seconds": meta["seconds"], "judge": score, **extra})
         except Exception as e:  # noqa: BLE001
             sys.stderr.write("tryon: ERR %s\n" % e)
             return self._json(500, {"error": str(e)})

@@ -123,8 +123,8 @@
       <div id="abWrap" style="display:none">
         <label>같은 사진으로 만든 두 결과 — 어느 쪽이 실제 같아요?</label>
         <div class="row" style="align-items:flex-start">
-          <div style="flex:1"><div class="hint">A · 겹친 화면 사실화</div><canvas id="abA" style="width:100%;border-radius:8px;background:#000"></canvas><button id="pickA" style="width:100%;margin-top:6px">A가 더 낫다</button></div>
-          <div style="flex:1"><div class="hint">B · 맨 눈 합성</div><canvas id="abB" style="width:100%;border-radius:8px;background:#000"></canvas><button id="pickB" style="width:100%;margin-top:6px">B가 더 낫다</button></div>
+          <div style="flex:1"><div class="hint">A · 전체 프레임 생성</div><canvas id="abA" style="width:100%;border-radius:8px;background:#000"></canvas><button id="pickA" style="width:100%;margin-top:6px">A가 더 낫다</button></div>
+          <div style="flex:1"><div class="hint">B · 눈 단위 전이</div><canvas id="abB" style="width:100%;border-radius:8px;background:#000"></canvas><button id="pickB" style="width:100%;margin-top:6px">B가 더 낫다</button></div>
         </div>
         <div class="hint" id="abStatus"></div>
       </div>
@@ -877,23 +877,22 @@ $('#lashThick').addEventListener('input', e => { state.lashThick = +e.target.val
 $('#lashScale').addEventListener('input', e => { state.lashScale = +e.target.value; $('#scaleOut').textContent = (+e.target.value).toFixed(2); });
 
 // 레퍼런스에서 윗눈꺼풀 띠 안의 어두운 가닥만 알파로 떼어낸 스프라이트 (한쪽 눈)
-function extractRefLashes() {
-  const [inner, outer, top] = pick.pts;
+function extractRefLashes(img = refImg, pts = pick.pts, root = pick.root, strip = pick.strip) {
+  const [inner, outer, top] = pts;
   const axis = sub(outer, inner), w = len(axis) || 1;
   let perp = v2(-axis.y, axis.x);
   const mid = mul(add(inner, outer), 0.5);
   if ((perp.x * (top.x - mid.x) + perp.y * (top.y - mid.y)) < 0) perp = mul(perp, -1); // 윗눈꺼풀 쪽
   const up = norm(perp);
   // 눈꺼풀 라인 근사: inner → top → outer 를 지나는 2차 곡선 (t: 0~1)
-  const lidAt = t => refLidAt({ inner, outer, top, root: pick.root }, t);
+  const lidAt = t => refLidAt({ inner, outer, top, root }, t);
   const rx = Math.max(0, Math.floor(Math.min(inner.x, outer.x, top.x) - w * 0.5));
-  const rx2 = Math.min(refImg.width, Math.ceil(Math.max(inner.x, outer.x, top.x) + w * 0.5));
+  const rx2 = Math.min(img.width, Math.ceil(Math.max(inner.x, outer.x, top.x) + w * 0.5));
   const ry = Math.max(0, Math.floor(Math.min(inner.y, outer.y, top.y) - w * 0.75));
-  const ry2 = Math.min(refImg.height, Math.ceil(Math.max(inner.y, outer.y, top.y) + w * 0.5));
+  const ry2 = Math.min(img.height, Math.ceil(Math.max(inner.y, outer.y, top.y) + w * 0.5));
   const rw = rx2 - rx, rh = ry2 - ry;
-  const src = pctx.getImageData(rx, ry, rw, rh).data; // pickCanvas엔 점이 그려져 있으니 원본에서 다시
   const tmp = document.createElement('canvas'); tmp.width = rw; tmp.height = rh;
-  tmp.getContext('2d').drawImage(refImg, rx, ry, rw, rh, 0, 0, rw, rh);
+  tmp.getContext('2d').drawImage(img, rx, ry, rw, rh, 0, 0, rw, rh);
   const d = tmp.getContext('2d').getImageData(0, 0, rw, rh).data;
   const n = rw * rh, lum = new Float32Array(n);
   for (let i = 0; i < n; i++) lum[i] = 0.299 * d[i*4] + 0.587 * d[i*4+1] + 0.114 * d[i*4+2];
@@ -912,7 +911,7 @@ function extractRefLashes() {
     const px = rx + i % rw, py = ry + Math.floor(i / rw);
     const { dv, t } = bandOf(px, py);
     let band = 0;
-    const tMin = pick.strip ? -0.02 : -0.35, tMax = pick.strip ? 1.02 : 1.45, hMax = pick.strip ? 0.8 : 0.65;
+    const tMin = strip ? -0.02 : -0.35, tMax = strip ? 1.02 : 1.45, hMax = strip ? 0.8 : 0.65;
     if (dv >= w * 0.03 && dv <= w * hMax && t >= tMin && t <= tMax) band = dv > w * (hMax - 0.1) ? (w * hMax - dv) / (w * 0.10) : (dv < w * 0.07 ? (dv - w * 0.03) / (w * 0.04) : 1);
     const dark = bg - lum[i];                         // 배경보다 얼마나 어두워졌나
     let alpha = Math.max(0, Math.min(1, (dark - 18) / 55)) * band;
@@ -956,7 +955,7 @@ function extractRefLashes() {
   }
   // 앵커: 눈앞, 눈꼬리, 중앙에서 눈 너비만큼 위 (레퍼런스 좌표, 스프라이트는 rx,ry 오프셋)
   const anchors = [inner, outer, add(mid, mul(up, w))];
-  return { sprite, rx, ry, anchors, w, bg, refLash, lid: { inner, outer, top, up, root: pick.root ? pick.root.map(p => ({ ...p })) : null }, mirrored: false };
+  return { sprite, rx, ry, anchors, w, bg, refLash, lid: { inner, outer, top, up, root: root ? root.map(p => ({ ...p })) : null }, mirrored: false };
 }
 // ---- 방식 D: 스프라이트 알파에서 가닥 구조(길이·각도·컬·굵기)를 t별로 읽어냄 ----
 // 결과: [{t, len(w 단위), ang(법선 기준, +는 눈꼬리 쪽), curl(rad), weight(0~1)}]
@@ -1084,15 +1083,71 @@ $('#btnPixelOff').addEventListener('click', e => { liveLayer = null; e.target.st
 
 // ---- 방식 B: 캡처 → 눈 크롭 → 이미지 편집 → 속눈썹 레이어 ----
 // 레퍼런스에서 눈 주변만 3:2로 크롭 (점 기준). 모델이 디자인에 집중하게
-function referenceEyeCrop() {
-  if (!refImg || pick.pts.length < 3) return refDataUrl;
+function refCropBox() {
+  if (!refImg || pick.pts.length < 3) return null;
   const [inner, outer, top] = pick.pts; const w = len(sub(outer, inner)) || refImg.width * 0.3;
   const cx = (inner.x + outer.x) / 2, cy = (inner.y + outer.y + top.y) / 3;
   let cw = Math.min(refImg.width, w * 2.1), ch = cw / 1.5; if (ch > refImg.height) { ch = refImg.height; cw = ch * 1.5; }
   const x0 = Math.max(0, Math.min(refImg.width - cw, cx - cw / 2)), y0 = Math.max(0, Math.min(refImg.height - ch, cy - ch * 0.55));
+  return { x0, y0, cw, ch, map: p => [(p.x - x0) * 1536 / cw, (p.y - y0) * 1024 / ch] };
+}
+function referenceEyeCrop() {
+  const b = refCropBox(); if (!b) return refDataUrl;
   const c = document.createElement('canvas'); c.width = 1536; c.height = 1024;
-  c.getContext('2d').drawImage(refImg, x0, y0, cw, ch, 0, 0, 1536, 1024);
+  c.getContext('2d').drawImage(refImg, b.x0, b.y0, b.cw, b.ch, 0, 0, 1536, 1024);
   return c.toDataURL('image/jpeg', 0.92);
+}
+// 레퍼런스 크롭(1536x1024) 안에서의 눈앞·눈꼬리 → 서버가 사용자 눈을 같은 배율로 자르는 기준
+function referenceEyeInCrop() {
+  const b = refCropBox();
+  if (!b) return { inner: [1536 * 0.27, 1024 * 0.5], outer: [1536 * 0.73, 1024 * 0.5] };
+  return { inner: b.map(pick.pts[0]), outer: b.map(pick.pts[1]) };
+}
+// 눈 단위 합성: 프레임 전체 + 두 눈의 랜드마크 기하(픽셀)를 보내고, 서버가 눈마다 레퍼런스 배율로 잘라 생성 → 속눈썹만 전이
+function eyesGeometry(lm, W, H) {
+  const P = i => v2(lm[i].x * W, lm[i].y * H);
+  const eyes = {};
+  [['left', 0, R_LOWER], ['right', 1, L_LOWER]].forEach(([side, i, lowerIdx]) => {
+    const U = userLid(lm, i, W, H);                       // 눈앞→눈꼬리 9점 (미간 기준으로 확정)
+    const pts = U.pts, root = [0, 2, 4, 6, 8].map(j => pts[j]);
+    const lower = lowerIdx.map(P);
+    eyes[side] = { inner: [pts[0].x, pts[0].y], outer: [pts[8].x, pts[8].y], root: root.map(p => [p.x, p.y]), lower: lower.map(p => [p.x, p.y]) };
+  });
+  return eyes;
+}
+async function runTryonEyes(snap) {
+  const { before, lm, W, H } = snap;
+  const eyes = eyesGeometry(lm, W, H);
+  const r = await fetch('/api/tryon', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ frame: before.toDataURL('image/jpeg', 0.92), reference: referenceEyeCrop(), engine: state.engine, lashmap: lastMap, geom: lastGeom, eyes, refEye: referenceEyeInCrop() }) });
+  const m = await r.json();
+  if (!r.ok) throw new Error(m.error || r.status);
+  const img = new Image(); img.src = m.image; await img.decode();
+  const after = document.createElement('canvas'); after.width = W; after.height = H;
+  after.getContext('2d').drawImage(img, 0, 0, W, H);
+  // 결과 보기용 크롭: 두 눈 박스의 합집합
+  const boxes = Object.values(m.eyes || {}).map(e => e.box);
+  const x0 = Math.min(...boxes.map(b => b[0])), y0 = Math.min(...boxes.map(b => b[1]));
+  const x1 = Math.max(...boxes.map(b => b[0] + b[2])), y1 = Math.max(...boxes.map(b => b[1] + b[3]));
+  return { after, run_id: m.run_id, crop: { x0, y0, cw: x1 - x0, ch: y1 - y0 }, guided: false, judge: m.judge, eyes: m.eyes };
+}
+// 생성 결과(눈 크롭)를 레퍼런스 삼아 라이브 레이어를 만든다 → 캡처 결과의 속눈썹이 라이브에서도 따라옴
+async function attachGenerated(eyesResp, run_id) {
+  const built = {};
+  for (const side of ['left', 'right']) {
+    const e = eyesResp?.[side]; if (!e) continue;
+    const img = new Image(); img.src = e.out; await img.decode();
+    const m = e.pts, P = (kx, ky) => v2(m[kx] * img.width, m[ky] * img.height);
+    const root = [0, 1, 2, 3, 4].map(j => P(`root_x${j}`, `root_y${j}`));
+    const L = extractRefLashes(img, [P('inner_corner_x', 'inner_corner_y'), P('outer_corner_x', 'outer_corner_y'), root[2]], root, false);
+    built[side] = L;
+  }
+  if (!built.left && !built.right) return false;
+  const one = built.left || mirrorSprite(built.right), two = built.right || mirrorSprite(built.left);
+  const mk = L => ({ sprite: L.sprite, rx: L.rx, ry: L.ry, src: L.anchors, lid: L.lid, w: L.w, mirrored: !!L.mirrored, openAtCapture: 0.3, smooth: null, pixel: true });
+  liveLayer = { eyes: [mk(one), mk(two)], show: true, run_id, before: null, after: null, pixel: true, refBg: one.bg, refLash: one.refLash, tone: null, profile: null };
+  $('#btnPixelOff').style.display = ''; $('#btnGenToggle').style.display = 'none';
+  return true;
 }
 // 한 번 캡처한 프레임으로 합성 실행. guided=true면 라이브 속눈썹을 겹친 화면을 입력으로
 async function runTryon(guided, snap) {
@@ -1155,12 +1210,13 @@ $('#btnTryon').addEventListener('click', async () => {
   if (eyePx() < 120) { st.className = 'hint err'; st.textContent = `눈이 ${Math.round(eyePx())}px예요. 120px 이상 되게 카메라에 더 가까이 온 뒤 눌러주세요.`; return; }
   const snap = snapshot();
   $('#btnTryon').disabled = true; $('#btnCompare').disabled = true; st.className = 'hint';
-  st.textContent = (state.guided && liveLayer?.pixel && liveLayer.show ? '라이브 속눈썹 위치를 기준으로 ' : '맨 눈에서 ') + '만드는 중… (20~70초)';
+  st.textContent = '눈마다 레퍼런스 배율로 잘라 만드는 중… (30~60초)';
   const t0 = performance.now();
   try {
-    const r = await runTryon(state.guided, snap);
+    const r = await runTryonEyes(snap);
     const j = r.judge ? ` · 자동 채점: 레퍼런스 유사도 ${r.judge.overall_similarity}/5 (길이 ${r.judge.length_match} · 질감 ${r.judge.texture_match} · 밀도 ${r.judge.density_match} · 실제감 ${r.judge.realism}) — ${r.judge.biggest_difference}` : '';
-    showResult(snap.before, r.after, r.run_id, `완료 (${r.guided ? '겹친 화면 사실화' : '맨 눈 합성'}) · ${((performance.now() - t0) / 1000).toFixed(1)}초${j}`, r.crop);
+    const live = await attachGenerated(r.eyes, r.run_id).catch(() => false);
+    showResult(snap.before, r.after, r.run_id, `완료 (눈 단위 전이) · ${((performance.now() - t0) / 1000).toFixed(1)}초${j}${live ? ' · 라이브에도 붙였어요 ("라이브로" 눌러서 움직여 보세요)' : ''}`, r.crop);
   } catch (err) {
     st.className = 'hint err'; st.textContent = '실패: ' + err.message;
   } finally { updateTryonBtn(); }
@@ -1177,12 +1233,12 @@ $('#btnCompare').addEventListener('click', async () => {
   result = null; $('#cmpWrap').style.display = 'none';
   const t0 = performance.now();
   try {
-    st.className = 'hint'; st.textContent = 'A 만드는 중… (20~50초)';
-    const A = await runTryon(true, snap);
-    paintAB('#abA', A.after, A.crop); if (A.judge) $('#abWrap').querySelectorAll('.hint')[0].textContent = `A · 겹친 화면 사실화 · 유사도 ${A.judge.overall_similarity}/5 · 질감 ${A.judge.texture_match}`;
-    st.textContent = 'B 만드는 중… (20~50초)';
-    const B = await runTryon(false, snap);
-    paintAB('#abB', B.after, B.crop); if (B.judge) $('#abWrap').querySelectorAll('.hint')[1].textContent = `B · 맨 눈 합성 · 유사도 ${B.judge.overall_similarity}/5 · 질감 ${B.judge.texture_match}`;
+    st.className = 'hint'; st.textContent = 'A(전체 프레임 생성) 만드는 중… (20~50초)';
+    const A = await runTryon(false, snap);
+    paintAB('#abA', A.after, A.crop); if (A.judge) $('#abWrap').querySelectorAll('.hint')[0].textContent = `A · 전체 프레임 생성 · 유사도 ${A.judge.overall_similarity}/5 · 질감 ${A.judge.texture_match} · 실제감 ${A.judge.realism}`;
+    st.textContent = 'B(눈 단위 전이) 만드는 중… (30~60초)';
+    const B = await runTryonEyes(snap);
+    paintAB('#abB', B.after, B.crop); if (B.judge) $('#abWrap').querySelectorAll('.hint')[1].textContent = `B · 눈 단위 전이 · 유사도 ${B.judge.overall_similarity}/5 · 질감 ${B.judge.texture_match} · 실제감 ${B.judge.realism}`;
     ab = { A, B, before: snap.before };
     st.className = 'hint ok'; st.textContent = `둘 다 완료 · ${((performance.now() - t0) / 1000).toFixed(0)}초. 아래에서 더 나은 쪽을 골라주세요.`;
   } catch (err) { st.className = 'hint err'; st.textContent = '실패: ' + err.message; }
