@@ -335,7 +335,7 @@ def _pts_to_eye(m: dict, W: int, H: int) -> dict:
     return e
 
 
-def tryon_eyes(frame_b64, ref_b64, ref_mime, eyes, ref_eye, engine, prompt, lower):
+def tryon_eyes(frame_b64, ref_b64, ref_mime, eyes, ref_eye, engine, prompt, lower, both=False):
     """eyes: {side: {inner:[x,y], outer:[x,y], root:[[x,y]*n], lower:[[x,y]*n]}} (프레임 픽셀). ref_eye: {inner, outer} (레퍼런스 크롭 픽셀, 1536x1024 기준).
     returns (result PIL, per-eye dict)."""
     import io as _io, threading
@@ -346,27 +346,38 @@ def tryon_eyes(frame_b64, ref_b64, ref_mime, eyes, ref_eye, engine, prompt, lowe
     ref_frac = max(0.2, min(0.8, ((ro[0] - ri[0]) ** 2 + (ro[1] - ri[1]) ** 2) ** 0.5 / lashcomp.OUT_W))
     ref_center = ((ri[0] + ro[0]) / 2 / lashcomp.OUT_W, (ri[1] + ro[1]) / 2 / lashcomp.OUT_H)
     per = {}
-    def work(side, e):
+    geo = {}
+    for side, e in eyes.items():
         eye = {"inner": tuple(e["inner"]), "outer": tuple(e["outer"]), "root": [tuple(p) for p in e["root"]]}
         if e.get("lower"): eye["lower"] = [tuple(p) for p in e["lower"]]
-        box = lashcomp.crop_box(eye, W, H, ref_frac, ref_center)
+        geo[side] = (eye, lashcomp.crop_box(eye, W, H, ref_frac, ref_center))
+    # 기본은 한쪽 눈만 생성 (더 큰/정면인 눈) → (u,v) 매트를 두 눈에 렌더. 두 눈 따로 생성하면 길이·밀도가 서로 달라져 "비율이 흔들림" (2026-09-26 폰 테스트)
+    gen_sides = list(eyes) if both else [max(geo, key=lambda k: lashcomp.eye_axes(geo[k][0])[3])]
+    def work(side, e):
+        eye, box = geo[side]
         cb = lashcomp.crop_b64(frame, box)
         t0 = time.time()
         mime, out_b64 = ENGINES[engine](cb, "image/jpeg", ref_b64, ref_mime, prompt)
+        t1 = time.time()
         out = Image.open(_io.BytesIO(base64.b64decode(out_b64))).convert("RGB").resize((lashcomp.OUT_W, lashcomp.OUT_H), Image.LANCZOS)
         buf = _io.BytesIO(); out.save(buf, "JPEG", quality=90); out_jpg = base64.b64encode(buf.getvalue()).decode()
         m = eyepoints(out_jpg, "image/jpeg", lower=True)           # 생성 결과 위의 눈 점 (눈이 옮겨져도 (u,v) 로 전이)
+        sys.stderr.write("tryon_eyes[%s]: gen %.1fs (%s) · points %.1fs\n" % (side, t1 - t0, GEMINI_IMAGE_MODEL if engine == "gemini" else OPENAI_IMAGE_MODEL, time.time() - t1))
         eye_out = _pts_to_eye(m, lashcomp.OUT_W, lashcomp.OUT_H)
         per[side] = {"eye": eye, "box": box, "out": out, "out_jpg": out_jpg, "pts": m, "eye_out": eye_out, "gen_seconds": round(time.time() - t0, 1)}
-    threads = [threading.Thread(target=work, args=(side, e)) for side, e in eyes.items()]
+    threads = [threading.Thread(target=work, args=(side, eyes[side])) for side in gen_sides]
     for t in threads: t.start()
     for t in threads: t.join()
-    if len(per) != len(eyes):
-        raise RuntimeError("눈 합성 일부 실패 (서버 로그 참고)")
-    result = frame
-    for side, d in per.items():
-        result, dbg = lashcomp.transfer_eye(result, d["eye"], d["out"], d["eye_out"], d["box"], lower=lower)
-        d["blur"] = dbg["blur"]
+    if len(per) != len(gen_sides):
+        raise RuntimeError("눈 합성 실패 (서버 로그 참고)")
+    result = frame; t2 = time.time()
+    for side in eyes:
+        src = per[side] if side in per else per[gen_sides[0]]          # 생성 안 한 눈은 생성한 눈의 매트를 그대로
+        maps = src.setdefault("maps", lashcomp.lash_maps(src["out"], src["eye_out"], lower))
+        eye, box = geo[side]
+        result, a_mean = lashcomp.render_eye(result, eye, box, maps)
+        per.setdefault(side, {"eye": eye, "box": box, "from": gen_sides[0]})["alpha_mean"] = round(a_mean, 4)
+    sys.stderr.write("tryon_eyes: render %.1fs\n" % (time.time() - t2))
     return result, per
 
 
@@ -466,13 +477,16 @@ class Handler(SimpleHTTPRequestHandler):
                 import io as _io
                 prompt = single_eye_prompt(prompt)
                 lower = bool(lm.get("lower_lashes"))
-                result, per = tryon_eyes(fb, rb, rm, req["eyes"], req["refEye"], engine, prompt, lower)
+                result, per = tryon_eyes(fb, rb, rm, req["eyes"], req["refEye"], engine, prompt, lower, both=bool(req.get("both")))
                 buf = _io.BytesIO(); result.save(buf, "JPEG", quality=92); mime, b64 = "image/jpeg", base64.b64encode(buf.getvalue()).decode()
                 for side, e in per.items():
-                    e["out"].save(os.path.join(d, f"eye-{side}-raw.jpg"), quality=90)
-                    extra.setdefault("eyes", {})[side] = {"box": e["box"], "out": "data:image/jpeg;base64," + e["out_jpg"], "pts": e["pts"], "gen_seconds": e["gen_seconds"]}
-                # 심사용: 첫 눈 박스를 결과에서 잘라 레퍼런스와 비교
-                side0 = next(iter(per)); x0, y0, cw, ch = per[side0]["box"]
+                    if "out" in e:
+                        e["out"].save(os.path.join(d, f"eye-{side}-raw.jpg"), quality=90)
+                        extra.setdefault("eyes", {})[side] = {"box": e["box"], "out": "data:image/jpeg;base64," + e["out_jpg"], "pts": e["pts"], "gen_seconds": e["gen_seconds"], "alpha_mean": e.get("alpha_mean")}
+                    else:
+                        extra.setdefault("eyes", {})[side] = {"box": e["box"], "from": e["from"], "alpha_mean": e.get("alpha_mean")}
+                # 심사용: 생성한 눈 박스를 결과에서 잘라 레퍼런스와 비교
+                side0 = next(k for k, v in per.items() if "out" in v); x0, y0, cw, ch = per[side0]["box"]
                 jb = _io.BytesIO(); result.crop((x0, y0, x0 + cw, y0 + ch)).resize((1536, 1024)).save(jb, "JPEG", quality=90)
                 judge_b64, judge_mime, judge_crop = base64.b64encode(jb.getvalue()).decode(), "image/jpeg", False
             else:
@@ -484,7 +498,7 @@ class Handler(SimpleHTTPRequestHandler):
                     f.write(base64.b64decode(data))
             meta = {"run_id": run_id, "engine": engine, "mode": "eyes" if req.get("eyes") else "frame", "guided": bool(req.get("guided")), "model": OPENAI_IMAGE_MODEL if engine == "openai" else GEMINI_IMAGE_MODEL,
                     "seconds": round(time.time() - t0, 1), "lashmap": req.get("lashmap"), "geom": req.get("geom"), "prompt": prompt,
-                    "eyes": {k: {"box": v["box"], "pts": v["pts"]} for k, v in extra.get("eyes", {}).items()} or None}
+                    "eyes": {k: {"box": v["box"], "pts": v.get("pts"), "from": v.get("from"), "alpha_mean": v.get("alpha_mean"), "gen_seconds": v.get("gen_seconds")} for k, v in extra.get("eyes", {}).items()} or None}
             with open(os.path.join(d, "meta.json"), "w") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=1)
             sys.stderr.write("tryon[%s/%s] %s: ok %s %d bytes %.1fs\n" % (engine, meta["mode"], run_id, mime, len(b64), meta["seconds"]))

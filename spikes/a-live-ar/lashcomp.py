@@ -185,7 +185,7 @@ def _uv_of(eye, which="root"):
     return fwd, inv, w
 
 
-def lash_map(out_img, eye_out, which="root", u_rng=(-0.35, 1.45), v_rng=(-0.04, 0.75), res=1400, thr=14.0, soft=42.0, gap=0.06):
+def lash_map(out_img, eye_out, which="root", u_rng=(-0.35, 1.45), v_rng=(-0.04, 0.75), res=1400, thr=14.0, soft=34.0, gap=0.06):
     """생성 결과 → (u,v) 격자의 속눈썹 매트 (alpha, rgb). 배경(70퍼센타일)보다 어두운 픽셀. 눈썹은 갭 컷으로 제거."""
     a = _np(out_img); H, W = a.shape[:2]
     fwd, inv, w = _uv_of(eye_out, which)
@@ -196,7 +196,13 @@ def lash_map(out_img, eye_out, which="root", u_rng=(-0.35, 1.45), v_rng=(-0.04, 
     lum = _lum(a)
     L = map_coordinates(lum, [Y, X], order=1, mode="nearest")
     rgb = np.stack([map_coordinates(a[..., c], [Y, X], order=1, mode="nearest") for c in range(3)], -1)
-    inside = (X >= 0) & (X < W) & (Y >= 0) & (Y < H)
+    # 생성 결과 가장자리의 검은 띠(모델이 붙이는 패딩)는 제외: 평균 밝기 40 미만인 테두리 열/행을 잘라냄
+    l = 0; r = W - 1; t = 0; b = H - 1
+    while l < W // 4 and lum[:, l].mean() < 40: l += 1
+    while r > W * 3 // 4 and lum[:, r].mean() < 40: r -= 1
+    while t < H // 4 and lum[t].mean() < 40: t += 1
+    while b > H * 3 // 4 and lum[b].mean() < 40: b -= 1
+    inside = (X >= l + 3) & (X <= r - 3) & (Y >= t + 3) & (Y <= b - 3)
     bg = np.percentile(L[inside], 70) if inside.any() else 200
     alpha = np.clip((bg - L - thr) / soft, 0, 1) * inside
     # 붉은/갈색 픽셀(쌍꺼풀 선, 눈꺼풀 가장자리, 피부 그림자) 제외: 속눈썹은 무채색~짙은 갈색이고 아주 어둡다
@@ -234,6 +240,35 @@ def render_map(frame_crop, eye_in, amap, rgb, grid, which="root", blur=0.0, stre
     A = np.clip(A, 0, 1)[..., None]
     out = a_in * (1 - A) + RGB * A
     return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), A[..., 0]
+
+
+def lash_maps(out_img, eye_out, lower=False):
+    """생성 결과 → (u,v) 매트들. u = 눈앞→눈꼬리 비율이라 반대쪽 눈에도 그대로 렌더할 수 있다."""
+    out = out_img.convert("RGB").resize((OUT_W, OUT_H), Image.LANCZOS)
+    maps = {"root": lash_map(out, eye_out, "root")}
+    if lower and eye_out.get("lower"):
+        maps["lower"] = lash_map(out, eye_out, "lower", u_rng=(0.06, 0.96), v_rng=(-0.45, -0.02))
+    return maps
+
+
+def render_eye(frame, eye, box, maps, blur=None):
+    """(u,v) 매트들을 프레임의 한쪽 눈에 렌더. returns (frame, alpha_mean)."""
+    x0, y0, cw, ch = box
+    crop_in = frame.crop((x0, y0, x0 + cw, y0 + ch)).resize((OUT_W, OUT_H), Image.LANCZOS)
+    e_in = to_crop(eye, box)
+    if blur is None: blur = max(0.0, 0.6 * (OUT_W / cw - 1.0))
+    amap, rgb, grid = maps["root"]
+    comp, A = render_map(crop_in, e_in, amap, rgb, grid, "root", blur=blur)
+    if "lower" in maps and e_in.get("lower"):
+        amap2, rgb2, grid2 = maps["lower"]
+        comp, A2 = render_map(comp, e_in, amap2, rgb2, grid2, "lower", blur=blur)
+        A = np.maximum(A, A2)
+    comp_small = np.asarray(comp.resize((cw, ch), Image.LANCZOS), np.float32)
+    a_small = np.asarray(Image.fromarray((A * 255).astype(np.uint8)).resize((cw, ch), Image.LANCZOS), np.float32)[..., None] / 255
+    base = np.asarray(frame.convert("RGB"), np.float32)
+    region = base[y0:y0 + ch, x0:x0 + cw]
+    base[y0:y0 + ch, x0:x0 + cw] = region * (1 - a_small) + comp_small * a_small
+    return Image.fromarray(np.clip(base, 0, 255).astype(np.uint8)), float(A.mean())
 
 
 def transfer_eye(frame, eye, out_img, eye_out, box, lower=False, blur=None):
