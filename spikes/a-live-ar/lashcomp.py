@@ -256,7 +256,7 @@ def render_eye(frame, eye, box, maps, blur=None):
     x0, y0, cw, ch = box
     crop_in = frame.crop((x0, y0, x0 + cw, y0 + ch)).resize((OUT_W, OUT_H), Image.LANCZOS)
     e_in = to_crop(eye, box)
-    if blur is None: blur = max(0.0, 0.6 * (OUT_W / cw - 1.0))
+    if blur is None: blur = min(0.8, max(0.0, 0.6 * (OUT_W / cw - 1.0)))   # 폰 프레임은 선명해서 과한 블러가 가닥을 옅게 만듦 (2026-09-26 폰 2차: alpha 0.043)
     amap, rgb, grid = maps["root"]
     comp, A = render_map(crop_in, e_in, amap, rgb, grid, "root", blur=blur)
     if "lower" in maps and e_in.get("lower"):
