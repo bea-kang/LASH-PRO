@@ -877,7 +877,7 @@ $('#lashThick').addEventListener('input', e => { state.lashThick = +e.target.val
 $('#lashScale').addEventListener('input', e => { state.lashScale = +e.target.value; $('#scaleOut').textContent = (+e.target.value).toFixed(2); });
 
 // 레퍼런스에서 윗눈꺼풀 띠 안의 어두운 가닥만 알파로 떼어낸 스프라이트 (한쪽 눈)
-function extractRefLashes(img = refImg, pts = pick.pts, root = pick.root, strip = pick.strip) {
+function extractRefLashes(img = refImg, pts = pick.pts, root = pick.root, strip = pick.strip, soft = 55) {
   const [inner, outer, top] = pts;
   const axis = sub(outer, inner), w = len(axis) || 1;
   let perp = v2(-axis.y, axis.x);
@@ -914,7 +914,7 @@ function extractRefLashes(img = refImg, pts = pick.pts, root = pick.root, strip 
     const tMin = strip ? -0.02 : -0.35, tMax = strip ? 1.02 : 1.45, hMax = strip ? 0.8 : 0.65;
     if (dv >= w * 0.03 && dv <= w * hMax && t >= tMin && t <= tMax) band = dv > w * (hMax - 0.1) ? (w * hMax - dv) / (w * 0.10) : (dv < w * 0.07 ? (dv - w * 0.03) / (w * 0.04) : 1);
     const dark = bg - lum[i];                         // 배경보다 얼마나 어두워졌나
-    let alpha = Math.max(0, Math.min(1, (dark - 18) / 55)) * band;
+    let alpha = Math.max(0, Math.min(1, (dark - 18) / soft)) * band;
     // 피부·아이라인 붉은기 제외: 속눈썹은 무채색~짙은 갈색. 붉고(R-B 큼) 아주 어둡진 않은 픽셀은 피부 그림자
     const rb = d[i*4] - d[i*4+2];
     if (lum[i] > 60) alpha *= 1 - Math.max(0, Math.min(1, (rb - 28) / 35));
@@ -944,10 +944,11 @@ function extractRefLashes(img = refImg, pts = pick.pts, root = pick.root, strip 
     for (let x = 0; x < rw; x++) {
       const L = lidAt(Math.max(-0.4, Math.min(1.5, ((rx + x - inner.x) * axis.x + (0 - 0) * axis.y) / (w * w))));
       let yStart = Math.min(rh - 1, Math.max(0, Math.round(L.y - ry)));   // 이 열의 뿌리 라인 높이(근사)
+      const near = Math.round(w * 0.12);                                   // 뿌리에서 12% 이내의 빈 구간은 무시 (큰 크롭에서 가닥이 통째로 잘리던 문제, 2026-09-26)
       let gap = 0, cut = -1;
       for (let y = yStart; y >= 0; y--) {
         const al = a[(y * rw + x) * 4 + 3];
-        if (al < 20) { gap++; if (gap >= gapPx) { cut = y; break; } } else gap = 0;
+        if (al < 20) { gap++; if (gap >= gapPx && yStart - y > near) { cut = y; break; } } else gap = 0;
       }
       if (cut >= 0) for (let y = cut; y >= 0; y--) a[(y * rw + x) * 4 + 3] = 0;
     }
@@ -1139,7 +1140,7 @@ async function attachGenerated(eyesResp, run_id) {
     const img = new Image(); img.src = e.out; await img.decode();
     const m = e.pts, P = (kx, ky) => v2(m[kx] * img.width, m[ky] * img.height);
     const root = [0, 1, 2, 3, 4].map(j => P(`root_x${j}`, `root_y${j}`));
-    const L = extractRefLashes(img, [P('inner_corner_x', 'inner_corner_y'), P('outer_corner_x', 'outer_corner_y'), root[2]], root, false);
+    const L = extractRefLashes(img, [P('inner_corner_x', 'inner_corner_y'), P('outer_corner_x', 'outer_corner_y'), root[2]], root, false, 40); // 생성 크롭은 배경이 깨끗해 문턱을 낮춰도 됨
     built[side] = L;
   }
   if (!built.left && !built.right) return false;
@@ -1149,6 +1150,7 @@ async function attachGenerated(eyesResp, run_id) {
   $('#btnPixelOff').style.display = ''; $('#btnGenToggle').style.display = 'none';
   return true;
 }
+window.__attachGenerated = attachGenerated; // 디버그: 저장된 run 으로 라이브 렌더 재현
 // 한 번 캡처한 프레임으로 합성 실행. guided=true면 라이브 속눈썹을 겹친 화면을 입력으로
 async function runTryon(guided, snap) {
   const { before, lm, W, H } = snap;
