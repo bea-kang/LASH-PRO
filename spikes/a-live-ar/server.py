@@ -354,9 +354,10 @@ def tryon_eyes(frame_b64, ref_b64, ref_mime, eyes, ref_eye, engine, prompt, lowe
     # 기본은 한쪽 눈만 생성 (더 큰/정면인 눈) → (u,v) 매트를 두 눈에 렌더. 두 눈 따로 생성하면 길이·밀도가 서로 달라져 "비율이 흔들림" (2026-09-26 폰 테스트)
     gen_sides = list(eyes) if both else [max(geo, key=lambda k: lashcomp.eye_axes(geo[k][0])[3])]
     def work(side, e):
+        t0 = time.time()
         eye, box = geo[side]
         cb = lashcomp.crop_b64(frame, box)
-        t0 = time.time()
+        sys.stderr.write("tryon_eyes[%s]: crop %.1fs\n" % (side, time.time() - t0))
         mime, out_b64 = ENGINES[engine](cb, "image/jpeg", ref_b64, ref_mime, prompt)
         t1 = time.time()
         out = Image.open(_io.BytesIO(base64.b64decode(out_b64))).convert("RGB").resize((lashcomp.OUT_W, lashcomp.OUT_H), Image.LANCZOS)
@@ -478,6 +479,7 @@ class Handler(SimpleHTTPRequestHandler):
                 prompt = single_eye_prompt(prompt)
                 lower = bool(lm.get("lower_lashes"))
                 result, per = tryon_eyes(fb, rb, rm, req["eyes"], req["refEye"], engine, prompt, lower, both=bool(req.get("both")))
+                sys.stderr.write("tryon: pipeline %.1fs\n" % (time.time() - t0))
                 buf = _io.BytesIO(); result.save(buf, "JPEG", quality=92); mime, b64 = "image/jpeg", base64.b64encode(buf.getvalue()).decode()
                 for side, e in per.items():
                     if "out" in e:
@@ -498,6 +500,7 @@ class Handler(SimpleHTTPRequestHandler):
                     f.write(base64.b64decode(data))
             meta = {"run_id": run_id, "engine": engine, "mode": "eyes" if req.get("eyes") else "frame", "guided": bool(req.get("guided")), "model": OPENAI_IMAGE_MODEL if engine == "openai" else GEMINI_IMAGE_MODEL,
                     "seconds": round(time.time() - t0, 1), "lashmap": req.get("lashmap"), "geom": req.get("geom"), "prompt": prompt,
+                    "request_eyes": req.get("eyes"), "request_ref_eye": req.get("refEye"),   # 재실험용: 폰 없이 같은 캡처를 다시 돌릴 수 있게
                     "eyes": {k: {"box": v["box"], "pts": v.get("pts"), "from": v.get("from"), "alpha_mean": v.get("alpha_mean"), "gen_seconds": v.get("gen_seconds")} for k, v in extra.get("eyes", {}).items()} or None}
             with open(os.path.join(d, "meta.json"), "w") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=1)
