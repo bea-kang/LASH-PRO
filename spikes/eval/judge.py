@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import server  # noqa: E402  (.env)
 
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "gpt-5.5")
+JUDGE_PROVIDER = os.environ.get("JUDGE_PROVIDER", server.VISION_PROVIDER)   # anthropic | openai
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -51,9 +52,16 @@ def b64(img, max_side=1024):
 
 
 def judge(ref_img, out_img, n=3):
-    key = os.environ["OPENAI_API_KEY"]
     rb, ob = b64(ref_img), b64(out_img)
     runs = []
+    if JUDGE_PROVIDER == "anthropic":
+        for _ in range(n):
+            content = [{"type": "text", "text": "Image 1 (reference):"}, server.img_block(rb, "image/jpeg"),
+                       {"type": "text", "text": "Image 2 (result):"}, server.img_block(ob, "image/jpeg"), {"type": "text", "text": PROMPT}]
+            r = server.claude_json(content, SCHEMA, effort="medium"); r.pop("_usage", None); runs.append(r)
+        keys = [k for k in SCHEMA["properties"] if k != "biggest_difference"]
+        return {"avg": {k: round(sum(x[k] for x in runs) / n, 2) for k in keys}, "runs": runs}
+    key = os.environ["OPENAI_API_KEY"]
     for _ in range(n):
         body = {
             "model": JUDGE_MODEL, "reasoning_effort": "medium",

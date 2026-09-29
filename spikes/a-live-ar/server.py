@@ -20,6 +20,9 @@ sys.path.insert(0, os.path.join(HERE, "..", "eval")) if False else None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OPENAI_VISION_MODEL = os.environ.get("OPENAI_VISION_MODEL", "gpt-4.1")          # 1차: 래시 맵 + 대략 위치 (빠름)
+# 2026-09-29: 번역·눈 점·채점(이미지→JSON) 호출을 Claude로. OpenAI 크레딧 소진 → Anthropic 크레딧 사용. VISION_PROVIDER=openai 로 되돌릴 수 있음
+ANTHROPIC_VISION_MODEL = os.environ.get("ANTHROPIC_VISION_MODEL", "claude-opus-5")
+VISION_PROVIDER = os.environ.get("VISION_PROVIDER", "anthropic" if os.environ.get("ANTHROPIC_API_KEY") else "openai")
 OPENAI_POINTS_MODEL = os.environ.get("OPENAI_POINTS_MODEL", "gpt-5.5")          # 2차: 정밀 점 (2026-09-22 비교: 4.1보다 확실히 정확, low effort 8초)
 OPENAI_POINTS_EFFORT = os.environ.get("OPENAI_POINTS_EFFORT", "low")
 GEMINI_IMAGE_MODEL = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
@@ -41,6 +44,9 @@ def load_dotenv():
 
 
 load_dotenv()
+# .env 를 읽은 뒤에 제공자 결정 (위의 기본값 계산 시점엔 키가 아직 안 실려 있음)
+VISION_PROVIDER = os.environ.get("VISION_PROVIDER", "anthropic" if os.environ.get("ANTHROPIC_API_KEY") else "openai")
+ANTHROPIC_VISION_MODEL = os.environ.get("ANTHROPIC_VISION_MODEL", "claude-opus-5")
 
 LASHMAP_SCHEMA = {
     "type": "object",
@@ -92,7 +98,53 @@ PROMPT = """이 사진은 속눈썹 디자인 레퍼런스입니다. (a) 샵 시
 """
 
 
+_anthropic = None
+
+
+def anthropic_client():
+    global _anthropic
+    if _anthropic is None:
+        import anthropic
+        _anthropic = anthropic.Anthropic()          # ANTHROPIC_API_KEY (.env)
+    return _anthropic
+
+
+def img_block(b64: str, media_type: str) -> dict:
+    return {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}}
+
+
+def claude_json(content: list, schema: dict, effort: str = "low", max_tokens: int = 8000) -> dict:
+    """이미지+텍스트 → JSON(schema 보장). content: [{type:image...}, {type:text...}] 순서.
+    claude-opus-5 + 적응형 사고(effort로 깊이 조절) + 서버측 refusal fallback(기본). 반환 dict 에 _usage 포함."""
+    import anthropic
+    client = anthropic_client()
+    kw = dict(model=ANTHROPIC_VISION_MODEL, max_tokens=max_tokens,
+              messages=[{"role": "user", "content": content}],
+              output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}})
+    try:
+        resp = client.beta.messages.create(betas=["server-side-fallback-2026-07-01"], fallbacks="default", **kw)
+    except (TypeError, anthropic.BadRequestError):
+        resp = client.messages.create(**kw)          # fallback 파라미터를 못 받는 환경이면 없이
+    if resp.stop_reason == "refusal":
+        d = getattr(resp, "stop_details", None)
+        raise RuntimeError("model refused: " + str(getattr(d, "explanation", "") or getattr(d, "category", "") or ""))
+    if resp.stop_reason == "max_tokens":
+        raise RuntimeError("Claude 응답이 max_tokens 에 잘렸어요")
+    text = next((b.text for b in resp.content if b.type == "text"), None)
+    if text is None:
+        raise RuntimeError("Claude 응답에 텍스트가 없어요: " + str([b.type for b in resp.content]))
+    data = json.loads(text)
+    u = resp.usage
+    data["_usage"] = {"in": getattr(u, "input_tokens", None), "out": getattr(u, "output_tokens", None), "model": getattr(resp, "model", None)}
+    return data
+
+
 def translate(image_b64: str, media_type: str) -> dict:
+    if VISION_PROVIDER == "anthropic":
+        data = claude_json([img_block(image_b64, media_type), {"type": "text", "text": PROMPT}], LASHMAP_SCHEMA, effort="low")
+        data["zone_lengths_mm"] = [max(6, min(15, int(data.pop(k)))) for k in ("len_inner_mm", "len_inner_mid_mm", "len_center_mm", "len_outer_mid_mm", "len_outer_mm")]
+        data["confidence"] = max(0.0, min(1.0, float(data["confidence"])))
+        return data
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
         raise RuntimeError("OPENAI_API_KEY가 없어요. spikes/a-live-ar/.env 에 OPENAI_API_KEY=sk-... 를 넣고 서버를 다시 띄우세요.")
@@ -158,6 +210,9 @@ EYEPOINTS_EXT_PROMPT = EYEPOINTS_PROMPT + "- lower_0..lower_4: 아랫눈꺼풀 �
 
 
 def eyepoints(image_b64: str, media_type: str, lower: bool = False) -> dict:
+    if VISION_PROVIDER == "anthropic":
+        return claude_json([img_block(image_b64, media_type), {"type": "text", "text": EYEPOINTS_EXT_PROMPT if lower else EYEPOINTS_PROMPT}],
+                           EYEPOINTS_EXT_SCHEMA if lower else EYEPOINTS_SCHEMA, effort="medium")   # low 는 뿌리 라인을 쌍꺼풀에 찍음 (2026-09-29 비교), medium 이 gpt-5.5 와 거의 일치
     key = os.environ.get("OPENAI_API_KEY")
     if not key:
         raise RuntimeError("OPENAI_API_KEY가 없어요.")
@@ -549,5 +604,6 @@ if __name__ == "__main__":
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(os.path.join(HERE, ".cert", "cert.pem"), os.path.join(HERE, ".cert", "key.pem"))
         srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    print(f"vision/json: {VISION_PROVIDER} ({ANTHROPIC_VISION_MODEL if VISION_PROVIDER == 'anthropic' else OPENAI_VISION_MODEL})", flush=True)
     print(f"spike A/B on {'https' if https else 'http'}://localhost:{port}  (openai key: {'yes' if os.environ.get('OPENAI_API_KEY') else 'NO'} [vision {OPENAI_VISION_MODEL}, points {OPENAI_POINTS_MODEL}/{OPENAI_POINTS_EFFORT}], gemini: {'yes' if os.environ.get('GEMINI_API_KEY') else 'NO'} [{GEMINI_IMAGE_MODEL}], openai: {'yes' if os.environ.get('OPENAI_API_KEY') else 'NO'} [{OPENAI_IMAGE_MODEL}])", flush=True)
     srv.serve_forever()
