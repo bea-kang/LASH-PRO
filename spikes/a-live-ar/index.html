@@ -107,6 +107,7 @@
         <button data-v="auto" class="on">자동 (위스피→Gemini Pro, 고른→Gemini Flash)</button>
         <button data-v="openai">GPT (gpt-image-1)</button>
         <button data-v="gemini">Gemini (설정값)</button>
+        <button data-v="reference">생성 없이 레퍼런스 픽셀 전이</button>
       </div>
       <div class="seg adv" id="guided">
         <button data-v="1" class="on">라이브 겹친 화면을 사실화</button>
@@ -1130,7 +1131,7 @@ async function runTryonEyes(snap) {
   const boxes = Object.values(m.eyes || {}).map(e => e.box);
   const x0 = Math.min(...boxes.map(b => b[0])), y0 = Math.min(...boxes.map(b => b[1]));
   const x1 = Math.max(...boxes.map(b => b[0] + b[2])), y1 = Math.max(...boxes.map(b => b[1] + b[3]));
-  return { after, run_id: m.run_id, crop: { x0, y0, cw: x1 - x0, ch: y1 - y0 }, guided: false, judge: m.judge, eyes: m.eyes };
+  return { after, run_id: m.run_id, crop: { x0, y0, cw: x1 - x0, ch: y1 - y0 }, guided: false, judge: m.judge, eyes: m.eyes, note: m.note };
 }
 // 생성 결과(눈 크롭)를 레퍼런스 삼아 라이브 레이어를 만든다 → 캡처 결과의 속눈썹이 라이브에서도 따라옴
 async function attachGenerated(eyesResp, run_id) {
@@ -1218,7 +1219,7 @@ $('#btnTryon').addEventListener('click', async () => {
     const r = await runTryonEyes(snap);
     const j = r.judge ? ` · 자동 채점: 레퍼런스 유사도 ${r.judge.overall_similarity}/5 (길이 ${r.judge.length_match} · 질감 ${r.judge.texture_match} · 밀도 ${r.judge.density_match} · 실제감 ${r.judge.realism}) — ${r.judge.biggest_difference}` : '';
     const live = await attachGenerated(r.eyes, r.run_id).catch(() => false);
-    showResult(snap.before, r.after, r.run_id, `완료 (눈 단위 전이) · ${((performance.now() - t0) / 1000).toFixed(1)}초${j}${live ? ' · 라이브에도 붙였어요 ("라이브로" 눌러서 움직여 보세요)' : ''}`, r.crop);
+    showResult(snap.before, r.after, r.run_id, `완료 (${r.note ? '우회: ' + r.note : '눈 단위 전이'}) · ${((performance.now() - t0) / 1000).toFixed(1)}초${j}${live ? ' · 라이브에도 붙였어요 ("라이브로" 눌러서 움직여 보세요)' : ''}`, r.crop);
   } catch (err) {
     st.className = 'hint err'; st.textContent = '실패: ' + err.message;
   } finally { updateTryonBtn(); }

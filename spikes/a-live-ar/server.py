@@ -411,21 +411,33 @@ def tryon_eyes(frame_b64, ref_b64, ref_mime, eyes, ref_eye, engine, prompt, lowe
     def work(side, e):
         t0 = time.time()
         eye, box = geo[side]
-        cb = lashcomp.crop_b64(frame, box)
-        sys.stderr.write("tryon_eyes[%s]: crop %.1fs\n" % (side, time.time() - t0))
-        mime, out_b64 = ENGINES[engine](cb, "image/jpeg", ref_b64, ref_mime, prompt)
+        if engine == "reference":
+            # 우회 경로(2026-10-04): 생성 모델 없이 레퍼런스 사진의 속눈썹을 직접 (u,v) 전이. Claude 눈 점만 사용
+            mime, out_b64 = ref_mime, ref_b64
+        else:
+            cb = lashcomp.crop_b64(frame, box)
+            sys.stderr.write("tryon_eyes[%s]: crop %.1fs\n" % (side, time.time() - t0))
+            mime, out_b64 = ENGINES[engine](cb, "image/jpeg", ref_b64, ref_mime, prompt)
         t1 = time.time()
         out = Image.open(_io.BytesIO(base64.b64decode(out_b64))).convert("RGB").resize((lashcomp.OUT_W, lashcomp.OUT_H), Image.LANCZOS)
         buf = _io.BytesIO(); out.save(buf, "JPEG", quality=90); out_jpg = base64.b64encode(buf.getvalue()).decode()
         m = eyepoints(out_jpg, "image/jpeg", lower=True)           # 생성 결과 위의 눈 점 (눈이 옮겨져도 (u,v) 로 전이)
-        sys.stderr.write("tryon_eyes[%s]: gen %.1fs (%s) · points %.1fs\n" % (side, t1 - t0, GEMINI_IMAGE_MODEL if engine == "gemini" else OPENAI_IMAGE_MODEL, time.time() - t1))
+        sys.stderr.write("tryon_eyes[%s]: gen %.1fs (%s) · points %.1fs\n" % (side, t1 - t0, {"gemini": GEMINI_IMAGE_MODEL, "openai": OPENAI_IMAGE_MODEL}.get(engine, engine), time.time() - t1))
         eye_out = _pts_to_eye(m, lashcomp.OUT_W, lashcomp.OUT_H)
         per[side] = {"eye": eye, "box": box, "out": out, "out_jpg": out_jpg, "pts": m, "eye_out": eye_out, "gen_seconds": round(time.time() - t0, 1)}
-    threads = [threading.Thread(target=work, args=(side, eyes[side])) for side in gen_sides]
+    errors = {}
+    def safe(side, e):
+        try: work(side, e)
+        except Exception as ex:  # noqa: BLE001
+            errors[side] = ex; sys.stderr.write("tryon_eyes[%s]: ERR %s\n" % (side, str(ex)[:400]))
+    threads = [threading.Thread(target=safe, args=(side, eyes[side])) for side in gen_sides]
     for t in threads: t.start()
     for t in threads: t.join()
     if len(per) != len(gen_sides):
-        raise RuntimeError("눈 합성 실패 (서버 로그 참고)")
+        msg = str(next(iter(errors.values()))) if errors else "원인 불명"
+        if "Gemini 429" in msg and "free_tier" in msg:
+            msg = "Gemini 이미지 생성 한도 초과 — 이 키가 무료 티어로 잡혀 있어요(이미지 모델은 무료 한도 0). Google AI Studio 결제 연결/크레딧을 확인해 주세요."
+        raise RuntimeError("눈 합성 실패: " + msg[:300])
     result = frame; t2 = time.time()
     for side in eyes:
         src = per[side] if side in per else per[gen_sides[0]]          # 생성 안 한 눈은 생성한 눈의 매트를 그대로
@@ -506,6 +518,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 
     def do_tryon(self):
+        global GEMINI_IMAGE_MODEL, OPENAI_IMAGE_MODEL
         n = int(self.headers.get("Content-Length", 0))
         try:
             req = json.loads(self.rfile.read(n))
@@ -517,12 +530,14 @@ class Handler(SimpleHTTPRequestHandler):
                 # 2026-09-26 비교: 위스피/과감 → gemini-3-pro-image(질감 4.0), 고른 스타일 → gemini-3.1-flash-image(실제감 5.0, 싸다)
                 if os.environ.get("GEMINI_API_KEY"):
                     engine = "gemini"
-                    global GEMINI_IMAGE_MODEL
                     GEMINI_IMAGE_MODEL = "gemini-3-pro-image" if (lm.get("texture") == "wispy" or (lm.get("drama") or 0) >= 4) else "gemini-3.1-flash-image"
                 else:
                     engine = "openai"
-            if engine not in ENGINES:
+            if engine not in ENGINES and engine != "reference":
                 return self._json(400, {"error": f"unknown engine {engine}"})
+            if req.get("model"):                       # 실험용: 이 요청의 생성 모델 지정 (eval/replay.py --engines)
+                if engine == "gemini": GEMINI_IMAGE_MODEL = req["model"]
+                elif engine == "openai": OPENAI_IMAGE_MODEL = req["model"]
             prompt = build_prompt(req.get("lashmap"), req.get("geom"), bool(req.get("guided")))
             t0 = time.time()
             run_id = time.strftime("%Y%m%d-%H%M%S")
@@ -533,7 +548,16 @@ class Handler(SimpleHTTPRequestHandler):
                 import io as _io
                 prompt = single_eye_prompt(prompt)
                 lower = bool(lm.get("lower_lashes"))
-                result, per = tryon_eyes(fb, rb, rm, req["eyes"], req["refEye"], engine, prompt, lower, both=bool(req.get("both")))
+                try:
+                    result, per = tryon_eyes(fb, rb, rm, req["eyes"], req["refEye"], engine, prompt, lower, both=bool(req.get("both")))
+                except RuntimeError as ex:
+                    if engine == "reference" or req.get("no_fallback"):
+                        raise
+                    # 생성 모델(Gemini/OpenAI) 한도·거부 → 레퍼런스 직접 전이로 우회
+                    sys.stderr.write("tryon: %s 실패 → reference 우회: %s\n" % (engine, str(ex)[:160]))
+                    extra["note"] = "생성 모델 실패(" + str(ex)[:80] + ") → 레퍼런스 사진 픽셀을 직접 옮겼어요"
+                    engine = "reference"
+                    result, per = tryon_eyes(fb, rb, rm, req["eyes"], req["refEye"], engine, prompt, lower, both=bool(req.get("both")))
                 sys.stderr.write("tryon: pipeline %.1fs\n" % (time.time() - t0))
                 buf = _io.BytesIO(); result.save(buf, "JPEG", quality=92); mime, b64 = "image/jpeg", base64.b64encode(buf.getvalue()).decode()
                 for side, e in per.items():
@@ -553,7 +577,7 @@ class Handler(SimpleHTTPRequestHandler):
             for name, mt, data in (("frame", fm, fb), ("reference", rm, rb), ("result", mime, b64)):
                 with open(os.path.join(d, name + "." + mt.split("/")[-1].replace("jpeg", "jpg")), "wb") as f:
                     f.write(base64.b64decode(data))
-            meta = {"run_id": run_id, "engine": engine, "mode": "eyes" if req.get("eyes") else "frame", "guided": bool(req.get("guided")), "model": OPENAI_IMAGE_MODEL if engine == "openai" else GEMINI_IMAGE_MODEL,
+            meta = {"run_id": run_id, "engine": engine, "mode": "eyes" if req.get("eyes") else "frame", "guided": bool(req.get("guided")), "model": {"openai": OPENAI_IMAGE_MODEL, "gemini": GEMINI_IMAGE_MODEL}.get(engine, "none (reference transfer)"),
                     "seconds": round(time.time() - t0, 1), "lashmap": req.get("lashmap"), "geom": req.get("geom"), "prompt": prompt,
                     "request_eyes": req.get("eyes"), "request_ref_eye": req.get("refEye"),   # 재실험용: 폰 없이 같은 캡처를 다시 돌릴 수 있게
                     "eyes": {k: {"box": v["box"], "pts": v.get("pts"), "from": v.get("from"), "alpha_mean": v.get("alpha_mean"), "gen_seconds": v.get("gen_seconds")} for k, v in extra.get("eyes", {}).items()} or None}

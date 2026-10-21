@@ -185,7 +185,7 @@ def _uv_of(eye, which="root"):
     return fwd, inv, w
 
 
-def lash_map(out_img, eye_out, which="root", u_rng=(-0.35, 1.45), v_rng=(-0.04, 0.75), res=1400, thr=14.0, soft=34.0, gap=0.06):
+def lash_map(out_img, eye_out, which="root", u_rng=(-0.35, 1.45), v_rng=(-0.04, 0.75), res=1000, thr=14.0, soft=34.0, gap=0.06):
     """생성 결과 → (u,v) 격자의 속눈썹 매트 (alpha, rgb). 배경(70퍼센타일)보다 어두운 픽셀. 눈썹은 갭 컷으로 제거."""
     a = _np(out_img); H, W = a.shape[:2]
     fwd, inv, w = _uv_of(eye_out, which)
@@ -195,7 +195,7 @@ def lash_map(out_img, eye_out, which="root", u_rng=(-0.35, 1.45), v_rng=(-0.04, 
     X, Y = inv(U, V)
     lum = _lum(a)
     L = map_coordinates(lum, [Y, X], order=1, mode="nearest")
-    rgb = np.stack([map_coordinates(a[..., c], [Y, X], order=1, mode="nearest") for c in range(3)], -1)
+    rgb = np.stack([map_coordinates(a[..., c], [Y, X], order=0, mode="nearest") for c in range(3)], -1)   # 색은 최근접(속도)
     # 생성 결과 가장자리의 검은 띠(모델이 붙이는 패딩)는 제외: 평균 밝기 40 미만인 테두리 열/행을 잘라냄
     l = 0; r = W - 1; t = 0; b = H - 1
     while l < W // 4 and lum[:, l].mean() < 40: l += 1
@@ -211,17 +211,19 @@ def lash_map(out_img, eye_out, which="root", u_rng=(-0.35, 1.45), v_rng=(-0.04, 
     # 눈 바깥 구간(u<0 또는 u>1)은 눈썹·머리카락이 가까우니 높이 제한
     outside = (U < -0.02) | (U > 1.02)
     alpha = alpha * np.where(outside & (np.abs(V) > 0.45), 0, 1)
-    # 눈썹/머리카락 컷: 각 u 열에서 뿌리에서 멀어지며 gap 이상 빈 구간이 나오면 그 위는 0
+    # 눈썹/머리카락 컷: 각 u 열에서 뿌리에서 멀어지며 gap 이상 빈 구간이 나오면 그 위는 0 (열 단위 벡터화, 2026-10-04: 파이썬 이중 루프 3초 → 수십 ms)
     dark = alpha > 0.25; gap_n = max(1, int(gap * nv / (v_rng[1] - v_rng[0])))
     order = np.argsort(np.abs(vs))                       # 뿌리(v≈0)에서 먼 쪽으로
-    for j in range(nu):
-        col = dark[:, j]; run = 0; cut = False
-        for i in order:
-            if cut: alpha[i, j] = 0; continue
-            if col[i]: run = 0
-            else:
-                run += 1
-                if run > gap_n and abs(vs[i]) > 0.12: cut = True
+    nd = ~dark[order, :]                                 # 정렬된 행 × 열, True = 빈 칸
+    far = np.abs(vs[order]) > 0.12
+    run = np.zeros(nu, np.int32); cut_at = np.full(nu, nv, np.int32)   # 각 열의 컷 시작 행(정렬 기준)
+    for r in range(nv):
+        run = np.where(nd[r], run + 1, 0)
+        hit = (run > gap_n) & far[r] & (cut_at == nv)
+        cut_at[hit] = r
+    rows = np.arange(nv)[:, None]
+    kill = rows > cut_at[None, :]                        # 컷 행 이후(뿌리에서 더 먼 쪽) 전부 0
+    a_sorted = alpha[order, :]; a_sorted[kill] = 0; alpha[order, :] = a_sorted
     return alpha.astype(np.float32), rgb.astype(np.float32), (us, vs)
 
 
@@ -234,7 +236,7 @@ def render_map(frame_crop, eye_in, amap, rgb, grid, which="root", blur=0.0, stre
     U, V = fwd(xs, ys)
     ui = (U - us[0]) / (us[-1] - us[0]) * (len(us) - 1); vi = (V - vs[0]) / (vs[-1] - vs[0]) * (len(vs) - 1)
     A = map_coordinates(amap, [vi, ui], order=1, mode="constant", cval=0.0) * strength
-    RGB = np.stack([map_coordinates(rgb[..., c], [vi, ui], order=1, mode="nearest") for c in range(3)], -1)
+    RGB = np.stack([map_coordinates(rgb[..., c], [vi, ui], order=0, mode="nearest") for c in range(3)], -1)
     if blur > 0:
         A = np.asarray(Image.fromarray((np.clip(A, 0, 1) * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(blur)), np.float32) / 255
     A = np.clip(A, 0, 1)[..., None]
