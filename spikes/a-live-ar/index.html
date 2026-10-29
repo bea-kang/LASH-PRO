@@ -678,8 +678,11 @@ function drawFrame(src, W, H, lm) {
     ctx.translate(W / 2, H / 2); ctx.scale(view.z, view.z); ctx.translate(-view.cx, -view.cy);
   }
   ctx.drawImage(src, 0, 0, W, H);
+  if (!lm) emaLm = null;
   if (lm && liveLayer && liveLayer.show) {
-    drawLiveLayer(ctx, lm, W, H);
+    const lmS = smoothLandmarks(lm);
+    drawLiveLayer(ctx, lmS, W, H);
+    occludeEyeAperture(ctx, src, lmS, W, H);
     const ew = len(sub(v2(lm[33].x * W, lm[33].y * H), v2(lm[133].x * W, lm[133].y * H)));
     if (ew < 110) { // 눈이 작으면 어떤 방식이든 가닥이 뭉개짐 → 가까이 오라고 안내
       ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.font = `${Math.round(H / 22)}px sans-serif`; ctx.textAlign = 'center';
@@ -893,6 +896,22 @@ function drawPixelEye(c, eye, lm, i, W, H, k) {
     for (const t of STRIP_EDGES) { const nU = localNormal(U.at, t, U.up); const a = add(U.at(t), mul(nU, U.w * rootOff)); c.moveTo(a.x, a.y); c.lineTo(a.x + nU.x * U.w * k * LASH_H, a.y + nU.y * U.w * k * LASH_H); }
     c.stroke(); c.restore();
   }
+}
+// Make 데모(design/make-demo/render_tracked_lashes.py)에서 가져옴 (2026-10-30):
+// (1) 랜드마크 EMA 0.68/0.32 로 프레임 간 떨림 완화 (2) 눈 구멍(aperture)은 원본 프레임을 다시 그려 속눈썹이 홍채·흰자·아랫눈꺼풀을 덮지 않게. 눈 감을 때 실제 눈꺼풀이 앞에 옴
+let emaLm = null;
+function smoothLandmarks(lm) {
+  if (!emaLm || emaLm.length !== lm.length) { emaLm = lm.map(p => ({ x: p.x, y: p.y, z: p.z })); return emaLm; }
+  for (let i = 0; i < lm.length; i++) { const e = emaLm[i], p = lm[i]; e.x = e.x * 0.68 + p.x * 0.32; e.y = e.y * 0.68 + p.y * 0.32; e.z = p.z; }
+  return emaLm;
+}
+function occludeEyeAperture(c, src, lm, W, H) {
+  c.save(); c.beginPath();
+  for (const [up, lo] of [[R_UPPER, R_LOWER], [L_UPPER, L_LOWER]]) {
+    const pts = up.map(i => lm[i]).concat(lo.slice().reverse().map(i => lm[i]));
+    pts.forEach((p, j) => j ? c.lineTo(p.x * W, p.y * H) : c.moveTo(p.x * W, p.y * H)); c.closePath();
+  }
+  c.clip(); c.drawImage(src, 0, 0, W, H); c.restore();
 }
 function drawLiveLayer(c, lm, W, H, smooth = true) {
   liveLayer.eyes.forEach((eye, i) => {
