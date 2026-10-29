@@ -393,7 +393,7 @@ function applyLashMap(m) {
 }
 $('#refFile').addEventListener('change', e => { const f = e.target.files[0]; if (f) loadReference(f); });
 // 시판 제품 프리셋: presets/catalog.json → 썸네일. 누르면 업로드와 같은 흐름
-fetch('presets/catalog.json').then(r => r.json()).then(list => {
+fetch('presets/catalog.json', { cache: 'no-store' }).then(r => r.json()).then(list => {   // 카탈로그는 자주 바뀌니 캐시 안 함
   const wrap = $('#presets');
   for (const p of list) {
     if (p.name_en && window.i18nAdd) window.i18nAdd(`${p.brand} ${p.name}`, `${p.brand_en || p.brand} ${p.name_en}`);
