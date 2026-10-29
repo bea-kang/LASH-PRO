@@ -373,6 +373,12 @@ seg('#engine', v => { state.engine = v; });
 seg('#renderMode', v => { state.renderMode = v; });
 seg('#guided', v => { state.guided = v === '1'; });
 function applyMode() { document.body.classList.toggle('simple', state.simple); $('#btnMode').textContent = state.simple ? '고급' : '간단'; }
+// ?demo : 영상 촬영용 (2026-10-30). 개발용 요소 숨김. ?demo&lang=en 이면 영어로 시작
+if (location.search.includes('demo')) {
+  document.body.classList.add('demo');
+  const st = document.createElement('style'); st.textContent = '.demo #btnMode,.demo #stats,.demo #btnCompare,.demo #fbWrap,.demo #btnPickToggle,.demo #abWrap{display:none!important}'; document.head.appendChild(st);
+  const want = new URLSearchParams(location.search).get('lang'); if (want && document.documentElement.lang !== want) $('#btnLang').click();
+}
 $('#btnMode').addEventListener('click', () => { state.simple = !state.simple; applyMode(); });
 applyMode();
 $('#btnPickToggle').addEventListener('click', () => { const w = $('#pickWrap'); w.style.display = w.style.display === 'none' ? '' : 'none'; });
