@@ -262,6 +262,8 @@
     ['자동 채점: 레퍼런스 유사도', 'auto score: similarity to reference'], ['유사도', 'similarity'], ['길이', 'length'], ['질감', 'texture'], ['밀도', 'density'], ['실제감', 'realism'],
     ['라이브에도 붙였어요 ("라이브로" 눌러서 움직여 보세요)', 'also attached live (tap "Back to live" to move)'], ['확신', 'confidence'], ['컬', ' curl'], ['초', 's'], ['제품 속눈썹', 'product lashes'],
     ['OpenAI 크레딧이 없어서 자동 인식이 안 돼요. ', 'No OpenAI credits, so auto detection is off. '], ['자동 인식 실패: ', 'Auto detection failed: '],
+    ['눈 합성 실패: ', 'Lash compositing failed: '], ['Gemini 이미지 생성 한도 초과 — 이 키가 무료 티어로 잡혀 있어요(이미지 모델은 무료 한도 0). Google AI Studio 결제 연결/크레딧을 확인해 주세요.', 'Gemini image generation quota exceeded — this key is on the free tier (image models have a zero free quota). Check billing in Google AI Studio.'],
+    ['이미지가 안 돌아왔어요: ', 'No image came back: '], ['Claude 응답이 max_tokens 에 잘렸어요', 'Claude response was cut off'], ['원인 불명', 'unknown cause'], ['서버 로그 참고', 'see server log'], ['가 없어요', ' is missing'],
   ];
   const HANGUL = /[가-힣]/;
   function tr(src) {
@@ -271,11 +273,16 @@
     let out = s; for (const [k, v] of PHRASES) out = out.split(k).join(v);
     return src.replace(s, out);
   }
+  window.i18nAdd = (ko, en) => { EXACT[ko] = en; };
+  window.i18nLang = () => lang;
   let lang = 'ko';
   try { lang = localStorage.getItem('lang') || (navigator.language && navigator.language.startsWith('ko') ? 'ko' : 'en'); } catch (e) {}
   const set = (n, v) => { n.__out = v; n.nodeValue = v; };
   function translateNode(n, force) {
     if (n.nodeType !== 3) return;
+    // 스크립트/스타일 안의 텍스트는 절대 건드리지 않음. (2026-10-30 버그: 파서가 모듈 스크립트 본문을 스트리밍으로 추가할 때
+    // 옵저버가 그 텍스트 노드를 번역해 버려, 실행 전 JS 소스의 한국어 리터럴이 부분 번역된 채 돌아감)
+    const pt = n.parentNode && n.parentNode.tagName; if (pt === 'SCRIPT' || pt === 'STYLE' || pt === 'TEXTAREA') return;
     const v = n.nodeValue;
     if (!force && v === n.__out) return;                 // 우리가 쓴 값
     if (!force || n.__src === undefined || v !== n.__out) n.__src = v;  // JS가 새로 쓴 값 = 한국어 원문
@@ -389,6 +396,7 @@ $('#refFile').addEventListener('change', e => { const f = e.target.files[0]; if 
 fetch('presets/catalog.json').then(r => r.json()).then(list => {
   const wrap = $('#presets');
   for (const p of list) {
+    if (p.name_en && window.i18nAdd) window.i18nAdd(`${p.brand} ${p.name}`, `${p.brand_en || p.brand} ${p.name_en}`);
     const b = document.createElement('button'); b.className = 'ghost'; b.style.cssText = 'padding:6px;display:flex;flex-direction:column;align-items:center;gap:4px;max-width:120px';
     b.innerHTML = `<img src="${p.image}" alt="" style="width:88px;height:88px;object-fit:cover;border-radius:8px"><span style="font-size:11px;line-height:1.2;text-align:center">${p.brand} ${p.name}</span>`;
     b.addEventListener('click', async () => { const blob = await (await fetch(p.image)).blob(); loadReference(new File([blob], p.id + '.png', { type: blob.type || 'image/png' }), { preset: p }); });
@@ -687,7 +695,7 @@ function drawFrame(src, W, H, lm) {
     if (ew < 110) { // 눈이 작으면 어떤 방식이든 가닥이 뭉개짐 → 가까이 오라고 안내
       ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.font = `${Math.round(H / 22)}px sans-serif`; ctx.textAlign = 'center';
       ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(0, H * 0.06, W, H / 12);
-      ctx.fillStyle = '#fff'; ctx.fillText(`눈이 ${Math.round(ew)}px · 더 가까이 오세요 (폰 셀카 거리면 150px 이상)`, W / 2, H * 0.06 + H / 16); ctx.restore();
+      ctx.fillStyle = '#fff'; ctx.fillText(window.i18nLang && window.i18nLang() === 'en' ? `Eye ${Math.round(ew)}px · move closer (150px+ at selfie distance)` : `눈이 ${Math.round(ew)}px · 더 가까이 오세요 (폰 셀카 거리면 150px 이상)`, W / 2, H * 0.06 + H / 16); ctx.restore();
     }
     stats.textContent = `${fps ? fps + ' fps · ' : ''}속눈썹 라이브 · 눈 ${Math.round(ew)}px · 톤 ${(liveLayer.tone || 1).toFixed(2)}`;
   } else if (lm && state.show && !state.simple) { // 간단 모드에선 레퍼런스 없이는 아무것도 안 붙임

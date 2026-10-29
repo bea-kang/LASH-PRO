@@ -1,4 +1,20 @@
 [
-  {"id": "coringco-toktok-natural", "brand": "코링코", "name": "톡톡 하라 · 내추럴 (9~11mm)", "image": "presets/coringco-toktok-natural.png", "buy": ""},
-  {"id": "coringco-toktok-spike", "brand": "코링코", "name": "톡톡 하라 · 스파이크 (9~11mm)", "image": "presets/coringco-toktok-spike.png", "buy": ""}
+  {
+    "id": "coringco-toktok-natural",
+    "brand": "코링코",
+    "name": "톡톡 하라 · 내추럴 (9~11mm)",
+    "image": "presets/coringco-toktok-natural.png",
+    "buy": "",
+    "brand_en": "Coringco",
+    "name_en": "TokTok Hara · Natural (9–11mm)"
+  },
+  {
+    "id": "coringco-toktok-spike",
+    "brand": "코링코",
+    "name": "톡톡 하라 · 스파이크 (9~11mm)",
+    "image": "presets/coringco-toktok-spike.png",
+    "buy": "",
+    "brand_en": "Coringco",
+    "name_en": "TokTok Hara · Spike (9–11mm)"
+  }
 ]
