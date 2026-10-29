@@ -6,3 +6,7 @@ spikes/a-live-ar/.cert/
 spikes/eval/cache/
 spikes/eval/reports/
 __pycache__/
+
+# 브랜드 제품 사진 (저작물) — 카탈로그 JSON만 추적
+spikes/a-live-ar/presets/*.png
+spikes/a-live-ar/presets/*.jpg

@@ -54,6 +54,9 @@ LASHMAP_SCHEMA = {
         "is_lash_photo": {"type": "boolean"},
         # 시판 속눈썹(스트립) 제품 사진: 흰/단색 배경에 띠 형태. 이 경우 눈 기준점 대신 띠 양 끝점을 씀
         "is_product_strip": {"type": "boolean"},
+        # 제품 사진 안의 '착용 눈 실사' 영역 (있으면 그걸 레퍼런스로 씀, 2026-10-30). 이미지 폭·높이 대비 0~1
+        "has_worn_eye_photo": {"type": "boolean"},
+        "worn_x0": {"type": "number"}, "worn_y0": {"type": "number"}, "worn_x1": {"type": "number"}, "worn_y1": {"type": "number"},
         "strip_left_x": {"type": "number"}, "strip_left_y": {"type": "number"},
         "strip_right_x": {"type": "number"}, "strip_right_y": {"type": "number"},
         "strip_lashes_side": {"type": "string", "enum": ["up", "down", "left", "right"]},
@@ -76,7 +79,7 @@ LASHMAP_SCHEMA = {
         "confidence": {"type": "number"},
         "notes": {"type": "string"},
     },
-    "required": ["is_lash_photo", "is_product_strip", "strip_left_x", "strip_left_y", "strip_right_x", "strip_right_y", "strip_lashes_side", "curl", "len_inner_mm", "len_inner_mid_mm", "len_center_mm", "len_outer_mid_mm", "len_outer_mm", "volume", "style", "texture", "lower_lashes", "drama", "inner_corner_x", "inner_corner_y", "outer_corner_x", "outer_corner_y", "lash_root_center_x", "lash_root_center_y", "confidence", "notes"],
+    "required": ["has_worn_eye_photo", "worn_x0", "worn_y0", "worn_x1", "worn_y1", "is_lash_photo", "is_product_strip", "strip_left_x", "strip_left_y", "strip_right_x", "strip_right_y", "strip_lashes_side", "curl", "len_inner_mm", "len_inner_mid_mm", "len_center_mm", "len_outer_mid_mm", "len_outer_mm", "volume", "style", "texture", "lower_lashes", "drama", "inner_corner_x", "inner_corner_y", "outer_corner_x", "outer_corner_y", "lash_root_center_x", "lash_root_center_y", "confidence", "notes"],
     "additionalProperties": False,
 }
 
@@ -84,6 +87,7 @@ PROMPT = """이 사진은 속눈썹 디자인 레퍼런스입니다. (a) 샵 시
 
 - is_product_strip: 눈이 아니라 제품 자체(띠에 붙은 속눈썹, 보통 흰/단색 배경, 케이스 위)가 찍힌 사진이면 true. 이 경우 strip_left/right는 띠(뿌리 밴드)의 양 끝점(이미지 폭·높이 대비 0~1), strip_lashes_side는 띠 기준으로 속눈썹 가닥이 뻗어 있는 방향. 제품이 여러 개면 가장 크고 선명한 것 하나. 눈 사진이면 false로 두고 strip 값은 0, side는 up.
 
+- has_worn_eye_photo / worn_x0,y0,x1,y1: 제품 사진 안에 '실제 눈에 착용한 모습' 실사(눈·홍채·눈꺼풀이 보이는 사진)가 같이 들어 있으면 true 와 그 영역의 바운딩 박스(왼쪽 위 x0,y0 / 오른쪽 아래 x1,y1, 0~1). 케이스·클러스터 일러스트·핀셋 그림은 제외. 없으면 false 와 0.
 - curl: J(거의 직선, 살짝 올라감) / C(표준 컬) / D(강한 컬, 눈꺼풀 쪽으로 많이 감김)
 - len_inner_mm → len_inner_mid_mm → len_center_mm → len_outer_mid_mm → len_outer_mm: 눈앞(내안각)부터 눈꼬리(외안각)까지 5구간의 연장 길이(mm). 실제 샵 사양 범위(6~15mm)로. 사진의 자연 속눈썹 길이와 비교해 추정.
 - volume: natural(1:1 클래식, 성근 느낌) / volume(2~4D, 촘촘) / mega(5D 이상, 매우 빽빽)

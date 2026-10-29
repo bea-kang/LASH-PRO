@@ -72,6 +72,8 @@
         <img id="refThumb" alt="" style="display:none;height:44px;border-radius:6px;object-fit:cover">
       </div>
       <div class="hint" id="refStatus">샵 인스타 스크린샷을 올리면 10초쯤 뒤 내 눈에 바로 붙어요.</div>
+      <label>시판 속눈썹으로 바로 해보기</label>
+      <div class="row" id="presets" style="gap:10px;flex-wrap:wrap"></div>
       <div class="row"><button id="btnPickToggle" class="ghost" style="display:none">점 수정</button></div>
       <div id="pickWrap" style="display:none">
         <label>사진 그대로 붙이기 (방식 C) — 레퍼런스 위에 <b id="pickStep">① 눈앞(안쪽 끝)</b> 클릭</label>
@@ -207,7 +209,7 @@
     '얼굴을 가까이, 밝은 곳에서. 인스타·카톡 안에서 열렸으면 Safari/Chrome으로 여세요.': 'Get close, in good light. If this opened inside Instagram or KakaoTalk, open it in Safari or Chrome.',
     '2. 하고 싶은 디자인 올리기': '2. Upload the design you want', '레퍼런스 사진 올리기': 'Upload reference photo',
     '샵 인스타 스크린샷을 올리면 10초쯤 뒤 내 눈에 바로 붙어요.': 'Upload a salon Instagram screenshot and it lands on your eyes in about 10 seconds.',
-    '점 수정': 'Adjust points', '사진 그대로 붙이기 (방식 C) — 레퍼런스 위에': 'Pixel transfer (method C) — on the reference, click:', '클릭': '',
+    '점 수정': 'Adjust points', '시판 속눈썹으로 바로 해보기': 'Try a retail lash set', '구매': 'Buy', '제품 사진에서 착용 컷을 찾았어요 → 그 눈으로 다시 읽는 중…': 'Found the worn-eye photo in the product image → reading that eye…', '사진 그대로 붙이기 (방식 C) — 레퍼런스 위에': 'Pixel transfer (method C) — on the reference, click:', '클릭': '',
     '① 눈앞(안쪽 끝)': '① Inner corner', '② 눈꼬리(바깥 끝)': '② Outer corner', '③ 윗눈꺼풀 라인 중앙': '③ Center of the upper lid line', '완료 — 점은 끌어서 옮길 수 있어요': 'Done — drag points to adjust',
     '점 다시 찍기': 'Reset points', '이 속눈썹을 내 눈에 붙이기': 'Put these lashes on my eyes', '떼기': 'Remove', '뗐어요.': 'Removed.',
     '순서: 눈앞(코 쪽 끝) → 눈꼬리(바깥 끝) → 윗눈꺼풀 라인 중앙(속눈썹 뿌리). 확대해서 찍으려면 트랙패드로 핀치.': 'Order: inner corner (nose side) → outer corner → center of the upper lid line (lash root). Pinch on the trackpad to zoom.',
@@ -382,8 +384,19 @@ function applyLashMap(m) {
   setSeg('#curl', m.curl); setSeg('#volume', m.volume); setSeg('#style', m.style); setSeg('#texture', state.texture);
   renderZones(); strands = null;
 }
-$('#refFile').addEventListener('change', async e => {
-  const f = e.target.files[0]; if (!f) return;
+$('#refFile').addEventListener('change', e => { const f = e.target.files[0]; if (f) loadReference(f); });
+// 시판 제품 프리셋: presets/catalog.json → 썸네일. 누르면 업로드와 같은 흐름
+fetch('presets/catalog.json').then(r => r.json()).then(list => {
+  const wrap = $('#presets');
+  for (const p of list) {
+    const b = document.createElement('button'); b.className = 'ghost'; b.style.cssText = 'padding:6px;display:flex;flex-direction:column;align-items:center;gap:4px;max-width:120px';
+    b.innerHTML = `<img src="${p.image}" alt="" style="width:88px;height:88px;object-fit:cover;border-radius:8px"><span style="font-size:11px;line-height:1.2;text-align:center">${p.brand} ${p.name}</span>`;
+    b.addEventListener('click', async () => { const blob = await (await fetch(p.image)).blob(); loadReference(new File([blob], p.id + '.png', { type: blob.type || 'image/png' }), { preset: p }); });
+    wrap.appendChild(b);
+    if (p.buy) { const a = document.createElement('a'); a.href = p.buy; a.target = '_blank'; a.rel = 'noopener'; a.textContent = '구매'; a.style.cssText = 'font-size:11px;margin-top:2px'; b.appendChild(a); }
+  }
+}).catch(() => {});
+async function loadReference(f, opts = {}) {
   const st = $('#refStatus'); st.className = 'hint'; st.textContent = '번역 중… (5~15초)';
   const thumb = $('#refThumb'); thumb.src = URL.createObjectURL(f); thumb.style.display = '';
   // 긴 변 1024px로 줄여서 전송 (비용·속도)
@@ -397,6 +410,16 @@ $('#refFile').addEventListener('change', async e => {
     if (!r.ok) throw new Error(m.error || r.status);
     if (!m.is_lash_photo) { st.className = 'hint err'; st.textContent = '속눈썹 사진으로 안 보여요: ' + m.notes; return; }
     applyLashMap(m); lastMap = m;
+    // 제품 사진 안에 '착용 눈' 실사가 있으면 그 영역을 잘라 눈 사진처럼 다시 처리 (케이스 속 클러스터보다 훨씬 좋은 레퍼런스)
+    if (refImg && m.is_product_strip && m.has_worn_eye_photo && !opts.fromWorn && (m.worn_x1 - m.worn_x0) > 0.12 && (m.worn_y1 - m.worn_y0) > 0.12) {
+      const W = refImg.width, H = refImg.height, mx = (m.worn_x1 - m.worn_x0) * 0.04, my = (m.worn_y1 - m.worn_y0) * 0.04;
+      const x0 = Math.max(0, (m.worn_x0 - mx) * W), y0 = Math.max(0, (m.worn_y0 - my) * H), x1 = Math.min(W, (m.worn_x1 + mx) * W), y1 = Math.min(H, (m.worn_y1 + my) * H);
+      const c = document.createElement('canvas'); const k = Math.max(1, 1024 / (x1 - x0)); c.width = Math.round((x1 - x0) * k); c.height = Math.round((y1 - y0) * k);
+      c.getContext('2d').drawImage(refImg, x0, y0, x1 - x0, y1 - y0, 0, 0, c.width, c.height);
+      st.textContent = '제품 사진에서 착용 컷을 찾았어요 → 그 눈으로 다시 읽는 중…';
+      const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.92));
+      return loadReference(new File([blob], 'worn.jpg', { type: 'image/jpeg' }), { ...opts, fromWorn: true });
+    }
     // 시판 속눈썹(스트립) 제품 사진: 띠 양 끝 = 눈앞/눈꼬리, 뿌리 중앙 = 띠 중앙을 가닥 쪽으로 살짝
     if (refImg && m.is_product_strip) {
       const L = v2(m.strip_left_x * refImg.width, m.strip_left_y * refImg.height), Rr = v2(m.strip_right_x * refImg.width, m.strip_right_y * refImg.height);
@@ -429,7 +452,7 @@ ${m.notes}`;
     st.textContent = (quota ? 'OpenAI 크레딧이 없어서 자동 인식이 안 돼요. ' : '자동 인식 실패: ' + err.message + ' ') + '아래 사진에서 눈앞 → 눈꼬리 → 속눈썹 뿌리 중앙 순서로 3점을 찍으면 붙일 수 있어요.';
     $('#pickWrap').style.display = ''; $('#btnPickToggle').style.display = ''; pick.pts = []; pick.root = null; drawPick();
   }
-});
+}
 function downscale(file, max) {
   return new Promise(res => {
     const img = new Image(); img.onload = () => {
