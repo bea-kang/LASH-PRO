@@ -4,6 +4,7 @@ Run:  python3 server.py  (port 8787)
 Keys: 같은 폴더의 .env (gitignore됨). OPENAI_API_KEY 하나로 다 됨. GEMINI_API_KEY 는 비교용 선택.
 """
 import base64
+import io
 import json
 import os
 import ssl
@@ -15,6 +16,8 @@ import urllib.error
 import urllib.request
 
 import requests
+import lashcomp
+from PIL import Image
 
 sys.path.insert(0, os.path.join(HERE, "..", "eval")) if False else None
 
@@ -496,10 +499,30 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 req = json.loads(self.rfile.read(n))
                 mt, b64 = split_data_url(req["image"])
-                out = eyepoints(b64, mt)
+                out = eyepoints(b64, mt, lower=bool(req.get("lower")))
                 sys.stderr.write("eyepoints: %s\n" % json.dumps(out))
                 return self._json(200, out)
             except Exception as e:  # noqa: BLE001
+                return self._json(500, {"error": str(e)})
+        if self.path == "/api/lashsprite":
+            # 레퍼런스 사진 + 눈 점(사진 픽셀) → 라이브용 펴진 (u,v) 스프라이트 (서버 파이썬 매트. 브라우저 JS 매트보다 가닥이 진하고 또렷함, 2026-10-31)
+            n = int(self.headers.get("Content-Length", 0))
+            try:
+                req = json.loads(self.rfile.read(n))
+                mt, b64 = split_data_url(req["image"])
+                img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+                e = req["eye"]; eye = {"inner": tuple(e["inner"]), "outer": tuple(e["outer"]), "root": [tuple(p) for p in e["root"]]}
+                if e.get("lower"): eye["lower"] = [tuple(p) for p in e["lower"]]
+                t0 = time.time()
+                up = lashcomp.rect_sprite(img, eye, "root")
+                out = {"upper": {**up, "png": base64.b64encode(up["png"]).decode()}}
+                if req.get("lower") and eye.get("lower"):
+                    lo = lashcomp.rect_sprite(img, eye, "lower")
+                    out["lower"] = {**lo, "png": base64.b64encode(lo["png"]).decode()}
+                sys.stderr.write("lashsprite: %.1fs upper alpha %.3f%s\n" % (time.time() - t0, up["alpha_mean"], (" lower %.3f" % out["lower"]["alpha_mean"]) if "lower" in out else ""))
+                return self._json(200, out)
+            except Exception as e:  # noqa: BLE001
+                import traceback; traceback.print_exc()
                 return self._json(500, {"error": str(e)})
         if self.path != "/api/lashmap":
             return self._json(404, {"error": "not found"})

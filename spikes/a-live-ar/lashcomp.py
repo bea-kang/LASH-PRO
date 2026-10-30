@@ -185,7 +185,7 @@ def _uv_of(eye, which="root"):
     return fwd, inv, w
 
 
-def lash_map(out_img, eye_out, which="root", u_rng=(-0.35, 1.45), v_rng=(-0.04, 0.75), res=1000, thr=14.0, soft=34.0, gap=0.06):
+def lash_map(out_img, eye_out, which="root", u_rng=(-0.35, 1.45), v_rng=(-0.04, 0.75), res=1000, thr=14.0, soft=34.0, gap=0.06, chroma=None):
     """생성 결과 → (u,v) 격자의 속눈썹 매트 (alpha, rgb). 배경(70퍼센타일)보다 어두운 픽셀. 눈썹은 갭 컷으로 제거."""
     a = _np(out_img); H, W = a.shape[:2]
     fwd, inv, w = _uv_of(eye_out, which)
@@ -208,6 +208,11 @@ def lash_map(out_img, eye_out, which="root", u_rng=(-0.35, 1.45), v_rng=(-0.04, 
     # 붉은/갈색 픽셀(쌍꺼풀 선, 눈꺼풀 가장자리, 피부 그림자) 제외: 속눈썹은 무채색~짙은 갈색이고 아주 어둡다
     rb = rgb[..., 0] - rgb[..., 2]
     alpha = alpha * np.where(L > 40, 1 - np.clip((rb - 45) / 35, 0, 1), 1)   # 강한 붉은기만 (쌍꺼풀 선·점막). 가닥 가장자리의 갈색은 유지
+    if chroma:                                             # 채도 거부 (2026-10-31, 라이브 스프라이트용): 천·머리띠·보라/핑크 톤 제품 사진. (시작, 폭)
+        c0, cw = chroma
+        sat = rgb.max(-1) - rgb.min(-1)
+        alpha = alpha * np.where(L > 40, 1 - np.clip((sat - c0) / cw, 0, 1), 1)
+        alpha = alpha * np.where(sat > c0 + cw * 0.5, 0, 1)        # 아주 진한 색(남색 천 등)은 어두워도 속눈썹이 아님
     # 눈 바깥 구간(u<0 또는 u>1)은 눈썹·머리카락이 가까우니 높이 제한
     outside = (U < -0.02) | (U > 1.02)
     alpha = alpha * np.where(outside & (np.abs(V) > 0.45), 0, 1)
@@ -298,3 +303,27 @@ def transfer_eye(frame, eye, out_img, eye_out, box, lower=False, blur=None):
     dbg = {"crop_in": crop_in, "crop_out": out, "comp": comp, "alpha": Image.fromarray((alpha_total * 255).astype(np.uint8)),
            "lash_map": Image.fromarray((amap * 255).astype(np.uint8)), "blur": blur, "box": box}
     return res, dbg
+
+
+def rect_sprite(img, eye, which="root", lower_thr=30.0, chroma=(45.0, 30.0)):
+    """레퍼런스 사진 → 펴진 (u,v) RGBA 스프라이트 (라이브 레이어용). x=u(눈앞→눈꼬리), y=v(위가 속눈썹 끝).
+    returns dict(png bytes, inner/outer/w 스프라이트 픽셀, up 벡터, ref_lash 가닥 밝기)."""
+    if which == "root":
+        u_rng, v_rng = (-0.25, 1.35), (-0.02, 0.75); kw = dict(chroma=chroma)   # 눈꼬리 밖 35% 이상은 머리띠·천·머리카락 (2026-10-31)
+    else:
+        u_rng, v_rng = (0.06, 0.96), (-0.45, -0.02); kw = dict(thr=lower_thr, soft=30.0, chroma=chroma)
+    a, rgb, (us, vs) = lash_map(img.convert("RGB"), eye, which, u_rng=u_rng, v_rng=v_rng, **kw)
+    if which != "root":                                     # 아랫눈꺼풀은 피부 그림자(애교살)가 섞이기 쉬움 → 붉은기 더 강하게 제외
+        Lr = _lum(np.clip(rgb, 0, 255)); rb = rgb[..., 0] - rgb[..., 2]
+        a = a * np.where(Lr > 35, 1 - np.clip((rb - 25) / 25, 0, 1), 1)
+    nv, nu = a.shape
+    px = np.zeros((nv, nu, 4), np.uint8); px[..., :3] = np.clip(rgb, 0, 255); px[..., 3] = np.clip(a * 255, 0, 255)
+    png = Image.fromarray(px[::-1])                        # 행 뒤집기: 위 = v 큰 쪽(속눈썹 끝)
+    buf = io.BytesIO(); png.save(buf, "PNG")
+    w = nu / (u_rng[1] - u_rng[0])                          # 눈 너비(픽셀). nv 가 같은 배율이라 등방
+    x_in = (0 - u_rng[0]) / (u_rng[1] - u_rng[0]) * nu; x_out = (1 - u_rng[0]) / (u_rng[1] - u_rng[0]) * nu
+    y_root = (v_rng[1] - 0) / (v_rng[1] - v_rng[0]) * (nv - 1)
+    L = _lum(np.clip(rgb, 0, 255)); dark = L[a >= 0.8]
+    return {"png": buf.getvalue(), "inner": [x_in, y_root], "outer": [x_out, y_root], "w": w,
+            "up": [0, -1] if which == "root" else [0, 1], "ref_lash": float(np.median(dark)) if dark.size else 40.0,
+            "alpha_mean": float(a.mean())}

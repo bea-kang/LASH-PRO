@@ -856,14 +856,11 @@ function measureTone(c, U) {
     }
     lums.sort((a, b) => a - b); const userLash = lums[Math.floor(lums.length * 0.15)] || 40; // 하위 15% = 속눈썹/라인
     const ratio = (userLash + 12) / ((liveLayer.refLash || 40) + 12);
-    const target = Math.max(0.6, Math.min(1.4, ratio));
+    const target = liveLayer?.server ? Math.max(0.7, Math.min(1.2, ratio)) : Math.max(0.6, Math.min(1.4, ratio)); // 서버 매트는 밝히면 갈색으로 떠서 좁게
     liveLayer.tone = liveLayer.tone ? liveLayer.tone * 0.8 + target * 0.2 : target;
   } catch (e) { /* 크로스오리진 등 */ }
 }
-function drawPixelEye(c, eye, lm, i, W, H, k) {
-  const U = userLid(lm, i, W, H), R = eye.lid, rw = eye.w;
-  if (i === 0 && (toneTick++ % 15 === 0)) measureTone(c, U);
-  const rootOff = 0.02; // 사용자 라인 바깥으로 2% 띄움
+function drawLidStrips(c, U, R, rw, sprite, rx, ry, k, rootOff) {
   const refAt = t => refLidAt(R, t);
   for (let sIdx = 0; sIdx < STRIP_EDGES.length - 1; sIdx++) {
     const t0 = STRIP_EDGES[sIdx], t1 = STRIP_EDGES[sIdx + 1], tm = (t0 + t1) / 2;
@@ -885,14 +882,21 @@ function drawPixelEye(c, eye, lm, i, W, H, k) {
     c.imageSmoothingEnabled = true; c.imageSmoothingQuality = 'high';
     // 세기: 겹쳐 그리는 횟수 (알파 누적). 조명: 사용자 눈 주변 밝기에 가닥 밝기를 맞춤
     const scale = U.w / rw;
-    const passes = Math.max(1, Math.round(state.lashStrength * (scale < 0.45 ? 0.6 : scale < 0.7 ? 0.8 : 1)));
+    const passes = liveLayer?.server ? 1 : Math.max(1, Math.round(state.lashStrength * (scale < 0.45 ? 0.6 : scale < 0.7 ? 0.8 : 1))); // 서버 매트는 알파가 이미 정확해 겹쳐 그리지 않음
     c.filter = `brightness(${(liveLayer.tone || 1).toFixed(2)})`;
     for (let pIdx = 0; pIdx < passes; pIdx++) {
       c.globalAlpha = pIdx === 0 ? 1 : 0.8;
-      c.drawImage(eye.sprite, eye.rx, eye.ry);
+      c.drawImage(sprite, rx, ry);
     }
     c.restore();
   }
+}
+function drawPixelEye(c, eye, lm, i, W, H, k) {
+  const U = userLid(lm, i, W, H), R = eye.lid, rw = eye.w;
+  if (i === 0 && (toneTick++ % 15 === 0)) measureTone(c, U);
+  drawLidStrips(c, U, R, rw, eye.sprite, eye.rx, eye.ry, k, 0.02); // 사용자 라인 바깥으로 2% 띄움
+  if (eye.lower) { const UL = userLowerLid(lm, i, W, H); drawLidStrips(c, UL, eye.lower.lid, eye.lower.w, eye.lower.sprite, 0, 0, 1, 0); }
+  const rootOff = 0.02, refAt = t => refLidAt(R, t);
   if (state.debug) { // 사용자 뿌리 라인(초록) + 위 방향(파랑) + 조각 경계(노랑) + 눈앞(분홍)/눈꼬리(파랑 점)
     c.save(); c.lineWidth = 1.5;
     const pin = U.at(0), pout = U.at(1), rr = Math.max(3, U.w * 0.05);
@@ -964,18 +968,56 @@ async function refinePoints() {
   const c = document.createElement('canvas'); const scale = Math.max(1, 1024 / cw);
   c.width = Math.round(cw * scale); c.height = Math.round(ch * scale);
   c.getContext('2d').drawImage(refImg, x0, y0, cw, ch, 0, 0, c.width, c.height);
-  const r = await fetch('/api/eyepoints', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: c.toDataURL('image/jpeg', 0.9) }) });
+  const r = await fetch('/api/eyepoints', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: c.toDataURL('image/jpeg', 0.9), lower: true }) });
   const m = await r.json(); if (!r.ok) throw new Error(m.error || r.status);
   const back = (nx, ny) => v2(x0 + nx * cw, y0 + ny * ch);
   const root = [0, 1, 2, 3, 4].map(j => back(m['root_x' + j], m['root_y' + j]));
   pick.pts = [back(m.inner_corner_x, m.inner_corner_y), back(m.outer_corner_x, m.outer_corner_y), root[2]];
-  pick.root = root; pick.auto = true; autoPts = pick.pts.map(p => ({ ...p })); drawPick();
+  pick.root = root; pick.lower = typeof m.lower_x0 === 'number' ? [0, 1, 2, 3, 4].map(j => back(m['lower_x' + j], m['lower_y' + j])) : null;
+  pick.auto = true; autoPts = pick.pts.map(p => ({ ...p })); drawPick();
   $('#pickStatus').className = 'hint'; $('#pickStatus').textContent = `2차 검출 완료 (확신 ${Math.round((m.confidence || 0) * 100)}%). 분홍=눈앞, 파랑=눈꼬리, 노랑=뿌리 중앙, 작은 노란 점=뿌리 라인. 어긋나면 점을 끌어서 맞춰요.`;
+  // 서버 파이썬 매트로 펴진 스프라이트 생성 (JS 매트보다 가닥이 진하고 또렷함, 2026-10-31). 실패하면 JS 매트로
+  try { await fetchServerSprite(); } catch (e) { console.warn('lashsprite 실패, JS 매트 사용:', e); pick.server = null; }
   // 점이 나오면 바로 붙임 (얼굴이 잡혀 있을 때). 아니면 카메라 켠 뒤 자동으로
   if (lastLm) $('#btnPixel').click(); else pendingAttach = true;
   $('#refStatus').className = 'hint ok'; $('#refStatus').textContent = ($('#refStatus').textContent.split('\n')[0]) + ' · 내 눈에 붙였어요. 마음에 들면 3번으로.';
 }
 let pendingAttach = false;
+// 서버 매트: 레퍼런스 사진 + 눈 점 → 펴진 (u,v) RGBA 스프라이트 (x=눈앞→눈꼬리, y=속눈썹 끝 방향). 양쪽 눈에 같은 스프라이트를 씀
+async function fetchServerSprite() {
+  pick.server = null;
+  if (!refDataUrl || !pick.root || pick.strip || pick.pts.length < 2) return null;
+  const eye = { inner: [pick.pts[0].x, pick.pts[0].y], outer: [pick.pts[1].x, pick.pts[1].y], root: pick.root.map(p => [p.x, p.y]) };
+  if (pick.lower) eye.lower = pick.lower.map(p => [p.x, p.y]);
+  const wantLower = !!(lastMap && lastMap.lower_lashes && pick.lower);
+  const r = await fetch('/api/lashsprite', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: refDataUrl, eye, lower: wantLower }) });
+  const m = await r.json(); if (!r.ok) throw new Error(m.error || r.status);
+  const mk = async s => {
+    const img = new Image(); img.src = 'data:image/png;base64,' + s.png; await img.decode();
+    const inner = v2(s.inner[0], s.inner[1]), outer = v2(s.outer[0], s.outer[1]);
+    return { sprite: img, w: s.w, refLash: s.ref_lash, lid: { inner, outer, top: mul(add(inner, outer), 0.5), up: v2(s.up[0], s.up[1]), root: null } };
+  };
+  const upper = await mk(m.upper); const lower = m.lower ? await mk(m.lower) : null;
+  pick.server = { upper, lower }; return pick.server;
+}
+// 사용자 아랫눈꺼풀 폴리라인 (눈앞→눈꼬리), up = 윗눈꺼풀에서 멀어지는 쪽(아래)
+function userLowerLid(lm, i, W, H) {
+  const idx = i === 0 ? R_LOWER.slice().reverse() : L_LOWER;
+  let pts = idx.map(j => v2(lm[j].x * W, lm[j].y * H));
+  const nose = v2(lm[168].x * W, lm[168].y * H);
+  if (len(sub(pts[0], nose)) > len(sub(pts[pts.length - 1], nose))) pts = pts.slice().reverse();
+  const top = i === 0 ? v2(lm[159].x * W, lm[159].y * H) : v2(lm[386].x * W, lm[386].y * H);
+  const inner = pts[0], outer = pts[pts.length - 1], axis = sub(outer, inner), w = len(axis) || 1;
+  let up = norm(v2(-axis.y, axis.x));
+  const mid = pts[Math.floor(pts.length / 2)];
+  if ((up.x * (mid.x - top.x) + up.y * (mid.y - top.y)) < 0) up = mul(up, -1);
+  const at = t => {
+    if (t < 0) { const d = norm(sub(pts[0], pts[1])); return add(pts[0], mul(d, -t * w)); }
+    if (t > 1) { const d = norm(sub(pts[pts.length - 1], pts[pts.length - 2])); return add(pts[pts.length - 1], mul(d, (t - 1) * w)); }
+    return alongPolyline(pts, t).p;
+  };
+  return { pts, w, up, at };
+}
 // 자동 점 정확도 기록용: 수동으로 다시 찍으면 자동 점과의 거리(눈 너비 대비)를 로그
 let autoPts = null;
 function drawPick() {
@@ -1001,7 +1043,7 @@ pickCanvas.addEventListener('pointerdown', e => {
   let best = null, bd = R;
   pick.pts.forEach((q, i) => { const d = len(sub(q, p)); if (d < bd) { bd = d; best = { kind: 'pt', idx: i }; } });
   (pick.root || []).forEach((q, i) => { const d = len(sub(q, p)); if (d < bd) { bd = d; best = { kind: 'root', idx: i }; } });
-  if (best) { dragging = best; pickCanvas.setPointerCapture(e.pointerId); pick.auto = false; return; }
+  if (best) { dragging = best; pickCanvas.setPointerCapture(e.pointerId); pick.auto = false; pick.server = null; return; }
   if (pick.pts.length < 3) { pick.pts.push(p); if (pick.pts.length === 3) { pick.root = null; $('#pickStatus').className = 'hint ok'; $('#pickStatus').textContent = '3점 완료. "이 속눈썹을 내 눈에 붙이기"를 누르세요.'; } drawPick(); }
 });
 pickCanvas.addEventListener('pointermove', e => {
@@ -1011,7 +1053,7 @@ pickCanvas.addEventListener('pointermove', e => {
   drawPick();
 });
 pickCanvas.addEventListener('pointerup', () => { dragging = null; });
-$('#pickReset').addEventListener('click', () => { pick.pts = []; pick.root = null; pick.auto = false; pick.strip = false; drawPick(); });
+$('#pickReset').addEventListener('click', () => { pick.pts = []; pick.root = null; pick.lower = null; pick.server = null; pick.auto = false; pick.strip = false; drawPick(); });
 $('#btnDebug').addEventListener('click', e => {
   state.debug = !state.debug; e.target.textContent = state.debug ? '디버그 끄기' : '디버그 보기';
   $('#dbgWrap').style.display = state.debug ? '' : 'none';
@@ -1234,12 +1276,13 @@ $('#btnPixel').addEventListener('click', () => {
   const [inner, outer] = pick.pts;
   const refIsImgLeft = inner.x > outer.x;
   const forImgLeft = refIsImgLeft ? one : two, forImgRight = refIsImgLeft ? two : one;
+  const sv = pick.server; // 서버 파이썬 매트(펴진 u,v 스프라이트)가 있으면 양쪽 눈에 그대로. 없으면 JS 매트
+  const mkEye = L => sv
+    ? { sprite: sv.upper.sprite, rx: 0, ry: 0, src: null, lid: sv.upper.lid, w: sv.upper.w, mirrored: false, openAtCapture: 0.3, smooth: null, pixel: true, lower: sv.lower }
+    : { sprite: L.sprite, rx: L.rx, ry: L.ry, src: L.anchors, lid: L.lid, w: L.w, mirrored: L.mirrored, openAtCapture: 0.3, smooth: null, pixel: true };
   liveLayer = {
-    eyes: [
-      { sprite: forImgLeft.sprite, rx: forImgLeft.rx, ry: forImgLeft.ry, src: forImgLeft.anchors, lid: forImgLeft.lid, w: forImgLeft.w, mirrored: forImgLeft.mirrored, openAtCapture: 0.3, smooth: null, pixel: true },
-      { sprite: forImgRight.sprite, rx: forImgRight.rx, ry: forImgRight.ry, src: forImgRight.anchors, lid: forImgRight.lid, w: forImgRight.w, mirrored: forImgRight.mirrored, openAtCapture: 0.3, smooth: null, pixel: true },
-    ],
-    show: true, run_id: 'pixel-' + Date.now(), before: null, after: null, pixel: true, refBg: one.bg, refLash: one.refLash, tone: null, profile,
+    eyes: [mkEye(forImgLeft), mkEye(forImgRight)],
+    show: true, run_id: 'pixel-' + Date.now(), before: null, after: null, pixel: true, refBg: one.bg, refLash: sv ? sv.upper.refLash : one.refLash, tone: null, profile, server: !!sv,
   };
   $('#btnPixelOff').style.display = ''; $('#btnGenToggle').style.display = 'none';
   if (state.debug) showSprite(liveLayer.eyes[0]);
