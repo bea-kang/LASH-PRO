@@ -103,7 +103,7 @@
       </div>
     </div>
 
-    <div class="ref step">
+    <div class="ref step" id="stepCapture">
       <label>3. 캡처해서 실제처럼 보기</label>
       <div class="seg adv" id="engine">
         <button data-v="auto" class="on">자동 (위스피→Gemini Pro, 고른→Gemini Flash)</button>
@@ -376,7 +376,7 @@ function applyMode() { document.body.classList.toggle('simple', state.simple); $
 // ?demo : 영상 촬영용 (2026-10-30). 개발용 요소 숨김. ?demo&lang=en 이면 영어로 시작
 if (location.search.includes('demo')) {
   document.body.classList.add('demo');
-  const st = document.createElement('style'); st.textContent = '.demo #btnMode,.demo #stats,.demo #btnCompare,.demo #fbWrap,.demo #btnPickToggle,.demo #abWrap{display:none!important}'; document.head.appendChild(st);
+  const st = document.createElement('style'); st.textContent = '.demo #stepCapture,.demo #btnMode,.demo #stats,.demo #btnCompare,.demo #fbWrap,.demo #btnPickToggle,.demo #abWrap{display:none!important}'; document.head.appendChild(st);
   const want = new URLSearchParams(location.search).get('lang'); if (want && document.documentElement.lang !== want) $('#btnLang').click();
 }
 $('#btnMode').addEventListener('click', () => { state.simple = !state.simple; applyMode(); });
